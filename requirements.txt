@@ -1,0 +1,6 @@
+streamlit>=1.40
+pandas>=2.2
+requests>=2.31
+nba_api>=1.10
+tzdata>=2025.1
+psycopg[binary]>=3.2
