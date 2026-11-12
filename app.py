@@ -72,6 +72,14 @@ def cached_player_news(espn_id):
     return fetch_player_news(espn_id)
 
 
+def season_end_year(values):
+    """Return ending year for NBA season labels such as 2026-27."""
+    labels = values.astype(str).str.strip()
+    starts = pd.to_numeric(labels.str.extract(r'^(\d{4})[-–]\d{2,4}$', expand=False), errors='coerce')
+    numeric = pd.to_numeric(labels, errors='coerce')
+    return (starts + 1).fillna(numeric)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_quick_view_pool(seasons):
     """Load the historical player pool once for Quick View interactions."""
@@ -79,7 +87,7 @@ def cached_quick_view_pool(seasons):
     if 'Player ID' in pool:
         pool['_quick_id'] = pool['Player ID'].astype(str)
     if 'Season' in pool:
-        pool['_quick_year'] = pd.to_numeric(pool['Season'], errors='coerce')
+        pool['_quick_year'] = season_end_year(pool['Season'])
     return pool
 
 
@@ -87,7 +95,7 @@ def cached_quick_view_pool(seasons):
 def cached_quick_player_rows(seasons, player_id):
     """Cache one player's historical rows; avoid repeated full-table scans."""
     pool = cached_quick_view_pool(seasons)
-    if '_quick_id' not in pool:
+    if '_quick_id' not in pool or 'Season' not in pool.columns:
         return pool.iloc[0:0].copy()
     return pool.loc[pool['_quick_id'].eq(str(player_id))].drop(
         columns=['_quick_id', '_quick_year'], errors='ignore'
@@ -856,7 +864,9 @@ else:
                         player_rows = cached_quick_player_rows(quick_seasons, choice[1])
                         # The year selector is scoped to the player, so switching
                         # players automatically selects that player's latest saved season.
-                        season_values = pd.to_numeric(player_rows['Season'], errors='coerce')
+                        season_values = (season_end_year(player_rows['Season'])
+                                         if 'Season' in player_rows.columns
+                                         else pd.Series(dtype='float64'))
                         available_years = sorted({int(y) for y in season_values.dropna()}, reverse=True)
                         with _year_select_col:
                             if available_years:
@@ -882,7 +892,7 @@ else:
                         # Keep every saved season for the historical stats table; only
                         # the overview and identity card follow the Year dropdown.
                         overview_rows = (player_rows.loc[
-                            pd.to_numeric(player_rows['Season'], errors='coerce').eq(selected_year)
+                            season_end_year(player_rows['Season']).eq(selected_year)
                         ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
                         photo, details = st.columns([1, 4])
                         with photo:
