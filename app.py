@@ -538,8 +538,9 @@ with st.expander('🏆 ESPN Fantasy League Refresh', expanded=False):
     st.caption('ESPN credentials are used only for the request. They are never stored in SQLite or CSV exports.')
     st.caption(f'League {fantasy_league} • Season {fantasy_year} (set ESPN_LEAGUE_ID in secrets or environment)')
     with st.form('espn_refresh'):
-        cookie = st.text_input('espn_s2 cookie', value=secret_or_env('ESPN_S2'), type='password')
-        swid = st.text_input('SWID cookie', value=secret_or_env('ESPN_SWID'), type='password')
+        # Keep private ESPN credentials out of the rendered page entirely.
+        cookie = secret_or_env('ESPN_S2')
+        swid = secret_or_env('ESPN_SWID')
         refresh_espn = st.form_submit_button('Refresh ESPN Fantasy Data')
     if refresh_espn:
         with st.spinner('Downloading ESPN league rosters and player metadata...'):
