@@ -1,7 +1,7 @@
 import time
 import pandas as pd
 import streamlit as st
-from nba_data import CATEGORIES, DB_PATH, combined_table, fetch_category, save_dataset, status_table
+from nba_data import CATEGORIES, DB_PATH, SCORING, combined_table, fetch_category, save_dataset, status_table
 from cloud_db import label as database_label
 import re
 import os
@@ -10,7 +10,147 @@ from datetime import datetime, time as clock_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 st.set_page_config(page_title='NBA Fantasy Analytics', page_icon='🏀', layout='wide')
+st.markdown('''<style>
+/* Reduce the unused space above the page title without hiding Streamlit controls. */
+.stAppViewContainer .block-container { padding-top: 1.5rem; }
+</style>''', unsafe_allow_html=True)
 st.title('🏀 NBA Fantasy Analytics')
+
+# Custom scoring is presentation-only: never rewrite saved NBA datasets or expected-stat caches.
+SCORING_LABELS = {
+    'PTS': 'Points', 'FGM': 'Field Goals Made', 'FGA': 'Field Goals Attempted',
+    'FTM': 'Free Throws Made', 'FTA': 'Free Throws Attempted',
+    '3PM': 'Three-Pointers Made', 'REB': 'Rebounds', 'AST': 'Assists',
+    'STL': 'Steals', 'BLK': 'Blocks', 'TOV': 'Turnovers',
+}
+SCORING_OPTIONS = dict(SCORING_LABELS)
+SCORING_OPTIONS.update({'OREB': 'Offensive Rebounds', 'DREB': 'Defensive Rebounds',
+                        '3PA': 'Three-Pointers Attempted', 'PF': 'Personal Fouls',
+                        'DD2': 'Double-Doubles', 'TD3': 'Triple-Doubles'})
+if 'nba_scoring_presets' not in st.session_state:
+    st.session_state.nba_scoring_presets = {'My ESPN League': dict(SCORING)}
+if 'nba_scoring_preset' not in st.session_state:
+    st.session_state.nba_scoring_preset = 'My ESPN League'
+if 'nba_scoring_rules' not in st.session_state:
+    st.session_state.nba_scoring_rules = dict(SCORING)
+
+
+def scoring_changed():
+    # Invalidate all calculated views, but leave the downloaded datasets and
+    # persisted expected-stat cache untouched.
+    for name in ('cached_combined', 'cached_main_fantasy_merge',
+                 'cached_quick_view_pool', 'cached_quick_player_rows',
+                 'cached_quick_all_ranks'):
+        fn = globals().get(name)
+        if fn is not None:
+            fn.clear()
+
+
+def apply_custom_scoring(frame):
+    if frame.empty:
+        return frame
+    result = frame.copy()
+    rules = st.session_state.get('nba_scoring_rules', SCORING)
+    if 'GP' not in result:
+        return result
+    # Missing source columns contribute zero. The saved data is never modified.
+    actual = pd.Series(0.0, index=result.index)
+    for key, weight in rules.items():
+        if key in result:
+            actual = actual.add(pd.to_numeric(result[key], errors='coerce').fillna(0) * float(weight), fill_value=0)
+    result['Fpts'] = actual.round(2)
+    gp = pd.to_numeric(result['GP'], errors='coerce').replace(0, float('nan'))
+    result['Fppg'] = (actual / gp).round(2)
+    expected_map = {'PTS': 'xPTS', 'FGM': 'xFGM', 'FTM': 'xFTM',
+                    '3PM': 'x3PM', 'REB': 'xREB', 'AST': 'xAST',
+                    'STL': 'xSTL', 'BLK': 'xBLK', 'TOV': 'xTO'}
+    if 'xFpts' in result:
+        expected = pd.Series(0.0, index=result.index)
+        available = pd.Series(True, index=result.index)
+        for key, weight in rules.items():
+            if not weight:
+                continue
+            source = expected_map.get(key, key)
+            if source not in result:
+                available &= False
+                continue
+            values = pd.to_numeric(result[source], errors='coerce')
+            available &= values.notna()
+            expected = expected.add(values.fillna(0) * float(weight), fill_value=0)
+        # Respect original source availability / expected-data eligibility.
+        original_expected = pd.to_numeric(result['xFpts'], errors='coerce')
+        result['xFpts'] = expected.where(available & original_expected.notna()).round(2)
+        result['xFppg'] = (result['xFpts'] / gp).round(2)
+        result['+-Fppg'] = (result['xFppg'] - result['Fppg']).round(2)
+    return result
+
+
+def custom_scoring_panel():
+    presets = st.session_state.nba_scoring_presets
+    if st.session_state.get('nba_pending_preset'):
+        st.session_state.nba_scoring_preset = st.session_state.pop('nba_pending_preset')
+    selected = st.selectbox('Scoring preset', list(presets), key='nba_scoring_preset')
+    if st.session_state.get('nba_last_scoring_preset') != selected:
+        st.session_state.nba_scoring_rules = dict(presets[selected])
+        for _key, _weight in presets[selected].items():
+            st.session_state[f'nba_weight_{_key}'] = float(_weight)
+        st.session_state.nba_last_scoring_preset = selected
+        scoring_changed()
+    with st.expander('Manage presets'):
+        preset_name = st.text_input('Preset name', key='nba_preset_name')
+        a, b = st.columns(2)
+        if a.button('Save current as preset', key='nba_save_preset'):
+            if preset_name.strip():
+                presets[preset_name.strip()] = dict(st.session_state.nba_scoring_rules)
+                st.session_state.nba_pending_preset = preset_name.strip()
+                st.session_state.nba_last_scoring_preset = preset_name.strip()
+                st.rerun()
+            else:
+                st.warning('Enter a preset name first.')
+        if b.button('Reset to ESPN scoring', key='nba_reset_scoring'):
+            st.session_state.nba_scoring_rules = dict(SCORING)
+            for _key, _weight in SCORING.items():
+                st.session_state[f'nba_weight_{_key}'] = float(_weight)
+            scoring_changed()
+            st.rerun()
+        if selected != 'My ESPN League' and st.button('Delete selected preset', key='nba_delete_preset'):
+            del presets[selected]
+            st.session_state.nba_pending_preset = 'My ESPN League'
+            st.session_state.nba_last_scoring_preset = None
+            st.rerun()
+    rules = st.session_state.nba_scoring_rules
+    st.caption(f'{len(rules)} active rules · Select × to remove a rule')
+    keys = list(rules)
+    for offset in range(0, len(keys), 2):
+        cols = st.columns(2)
+        for col, key in zip(cols, keys[offset:offset + 2]):
+            with col:
+                left, value, remove = st.columns([5, 2, 1], vertical_alignment='center')
+                left.markdown(f'**{SCORING_OPTIONS.get(key, key)}** `{key}`')
+                updated = value.number_input(key, value=float(rules[key]), step=0.5,
+                                             label_visibility='collapsed', key=f'nba_weight_{key}')
+                if updated != rules[key]:
+                    rules[key] = updated
+                    scoring_changed()
+                    st.rerun()
+                if remove.button('×', key=f'nba_remove_{key}', help=f'Remove {key}'):
+                    del rules[key]
+                    scoring_changed()
+                    st.rerun()
+    with st.expander('＋ Add or edit a scoring rule'):
+        choices = [k for k in SCORING_OPTIONS if k not in rules]
+        if choices:
+            new_key = st.selectbox('Statistic', choices, format_func=lambda k: f'{SCORING_OPTIONS[k]} ({k})', key='nba_new_rule')
+            new_weight = st.number_input('Points per statistic', value=1.0, step=0.5, key='nba_new_weight')
+            if st.button('Add scoring rule', key='nba_add_rule'):
+                rules[new_key] = new_weight
+                scoring_changed()
+                st.rerun()
+        else:
+            st.caption('All available statistics already have scoring rules.')
+    st.caption('Scoring changes recalculate fantasy totals from saved stats without redownloading. '
+               'Presets are kept for this Streamlit session; they do not change SQLite or the Cloud database.')
+
 
 with st.sidebar:
     st.header('View filters')
@@ -58,7 +198,7 @@ def cached_combined(season_tuple, category_tuple, revision=None):
     if revision is None:
         revision = dataset_revision()
     expected = cached_expected_statistics(revision)
-    return combined_table(list(season_tuple), list(category_tuple), expected=expected)
+    return apply_custom_scoring(combined_table(list(season_tuple), list(category_tuple), expected=expected))
 
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
 def cached_main_fantasy_merge(season_tuple, category_tuple, fantasy_year, fantasy_updated, fantasy_snapshot, revision):
@@ -206,7 +346,7 @@ EXPECTED_STAT_HELP = {
     'xSTL': 'Expected steals = minutes × adjusted player steal rate + deflections × fitted deflection coefficient. Player rate is smoothed toward the league rate using 500 minutes.',
     'xBLK': 'Expected blocks = contested shots × league blocks / league contested shots (within the season).',
     'xTO': 'Expected turnovers = touches × (weighted historical turnovers + 1000 × league turnovers-per-touch) / (weighted historical touches + 1000).',
-    'xFpts': 'Expected fantasy points = xPTS + 2×xFGM − FGA + xFTM − FTA + x3PM + xREB + 2×xAST + 4×xSTL + 4×xBLK − 2×xTO.',
+    'xFpts': 'Expected fantasy points using the selected Custom Fantasy Scoring weights and available expected statistics.',
     'xFppg': 'Expected fantasy points per game = xFpts / GP.',
     '+-Fppg': 'Expected fantasy points per game minus actual fantasy points per game = xFppg − Fppg.',
 }
@@ -466,7 +606,7 @@ def completeness_dashboard(season_labels):
             row[category] = dataset_status(season, category, timestamps, now)
         rows.append(row)
     table = pd.DataFrame(rows)
-    with st.expander('📋 Data Completeness Dashboard', expanded=False):
+    if True:  # Visibility controlled by the dashboard toggle, not a nested expander.
         st.caption(f'Current season: {current}. After 2:00 AM Eastern each day, current-season datasets last downloaded before that cutoff show **🔄 Need Update** until refreshed. This is a scheduled reminder, not confirmation that the NBA has published new statistics.')
         if table.empty:
             st.info('No seasons in the selected range.')
@@ -534,92 +674,95 @@ def completeness_dashboard(season_labels):
                 st.info('Current-season refresh suggested: ' + ', '.join(pending_categories))
 
 
-with st.expander('🏆 ESPN Fantasy League Refresh', expanded=False):
-    st.caption('ESPN credentials are used only for the request. They are never stored in SQLite or CSV exports.')
-    st.caption(f'League {fantasy_league} • Season {fantasy_year} (set ESPN_LEAGUE_ID in secrets or environment)')
-    with st.form('espn_refresh'):
-        # Keep private ESPN credentials out of the rendered page entirely.
-        cookie = secret_or_env('ESPN_S2')
-        swid = secret_or_env('ESPN_SWID')
-        refresh_espn = st.form_submit_button('Refresh ESPN Fantasy Data')
-    if refresh_espn:
-        with st.spinner('Downloading ESPN league rosters and player metadata...'):
-            try:
-                fantasy_frame, info = fetch_fantasy(fantasy_year, fantasy_league, cookie, swid)
-                save_fantasy(fantasy_year, fantasy_league, fantasy_frame)
-                cached_fantasy.clear()
-                cached_player_news.clear()
-                st.success(f"Saved {len(fantasy_frame)} ESPN players, {info['rostered']} rostered entries, {info['teams']} fantasy teams, {info['abbreviations']} ESPN team abbreviations; {info['rostered_abbreviations']} rostered players assigned an abbreviation.")
-                if not info['abbreviations']:
-                    st.warning('ESPN did not return team abbreviations. Check your league team settings in ESPN.')
-                st.info(f"ESPN draft picks retrieved: {info.get('draft_picks', 0)}")
-                if info.get('draft_error'):
-                    st.warning('ESPN draft request failed: ' + info['draft_error'])
-                elif not info.get('draft_picks'):
-                    st.warning('ESPN returned no draft picks. Check that the league draft is complete.')
+top_left, top_right = st.columns(2)
+with top_left:
+  with st.expander('🏆 ESPN Fantasy League', expanded=False):
+      st.caption('ESPN credentials are used only for the request. They are never stored in SQLite or CSV exports.')
+      st.caption(f'League {fantasy_league} • Season {fantasy_year} (set ESPN_LEAGUE_ID in secrets or environment)')
+      with st.form('espn_refresh'):
+          # Keep private ESPN credentials out of the rendered page entirely.
+          cookie = secret_or_env('ESPN_S2')
+          swid = secret_or_env('ESPN_SWID')
+          refresh_espn = st.form_submit_button('Refresh ESPN Fantasy Data')
+      if refresh_espn:
+          with st.spinner('Downloading ESPN league rosters and player metadata...'):
+              try:
+                  fantasy_frame, info = fetch_fantasy(fantasy_year, fantasy_league, cookie, swid)
+                  save_fantasy(fantasy_year, fantasy_league, fantasy_frame)
+                  cached_fantasy.clear()
+                  cached_player_news.clear()
+                  st.success(f"Saved {len(fantasy_frame)} ESPN players, {info['rostered']} rostered entries, {info['teams']} fantasy teams, {info['abbreviations']} ESPN team abbreviations; {info['rostered_abbreviations']} rostered players assigned an abbreviation.")
+                  if not info['abbreviations']:
+                      st.warning('ESPN did not return team abbreviations. Check your league team settings in ESPN.')
+                  st.info(f"ESPN draft picks retrieved: {info.get('draft_picks', 0)}")
+                  if info.get('draft_error'):
+                      st.warning('ESPN draft request failed: ' + info['draft_error'])
+                  elif not info.get('draft_picks'):
+                      st.warning('ESPN returned no draft picks. Check that the league draft is complete.')
 
-                st.rerun()
-            except Exception as exc:
-                st.error(f'ESPN refresh failed: {type(exc).__name__}: {exc}')
-    if fantasy_updated:
-        st.caption(f'Last ESPN refresh (UTC): {fantasy_updated}')
-        if 'Draft Round' in fantasy_frame.columns:
-            st.caption(f"Saved fantasy draft positions: {fantasy_frame['Draft Round'].notna().sum()}")
-        else:
-            st.warning('Saved ESPN snapshot predates draft support. Refresh ESPN Fantasy Data.')
+                  st.rerun()
+              except Exception as exc:
+                  st.error(f'ESPN refresh failed: {type(exc).__name__}: {exc}')
+      if fantasy_updated:
+          st.caption(f'Last ESPN refresh (UTC): {fantasy_updated}')
+          if 'Draft Round' in fantasy_frame.columns:
+              st.caption(f"Saved fantasy draft positions: {fantasy_frame['Draft Round'].notna().sum()}")
+          else:
+              st.warning('Saved ESPN snapshot predates draft support. Refresh ESPN Fantasy Data.')
 
-        st.caption(f'{len(fantasy_frame)} ESPN players available. Roster ownership and injuries reflect the last refresh, not live changes.')
-        if 'Fantasy Abbrev' not in fantasy_frame.columns or not fantasy_frame.get('Fantasy Abbrev', pd.Series(dtype=str)).fillna('').astype(str).str.strip().any():
-            st.warning('Saved ESPN data has no fantasy team abbreviations. Refresh ESPN Fantasy Data to populate them.')
-    else:
-        st.info('No saved ESPN data for this league/season. Enter your ESPN cookies and refresh.')
+          st.caption(f'{len(fantasy_frame)} ESPN players available. Roster ownership and injuries reflect the last refresh, not live changes.')
+          if 'Fantasy Abbrev' not in fantasy_frame.columns or not fantasy_frame.get('Fantasy Abbrev', pd.Series(dtype=str)).fillna('').astype(str).str.strip().any():
+              st.warning('Saved ESPN data has no fantasy team abbreviations. Refresh ESPN Fantasy Data to populate them.')
+      else:
+          st.info('No saved ESPN data for this league/season. Enter your ESPN cookies and refresh.')
 
-with st.expander('📥 Download / Refresh Data', expanded=False):
-    st.caption('Choose the exact season/category combinations to request. Existing downloads remain saved.')
-    download_now = datetime.now(ZoneInfo('America/New_York'))
-    download_year = download_now.year if download_now.month >= 10 else download_now.year - 1
-    fetch_default = f'{download_year}-{str(download_year + 1)[-2:]}'
-    download_seasons = [f'{y}-{str(y + 1)[-2:]}' for y in range(2016, 2027)]
-    with st.form('download_selection_form'):
-        fetch_seasons = st.multiselect('Seasons to download', download_seasons, default=[fetch_default] if fetch_default in download_seasons else download_seasons[-1:])
-        fetch_categories = st.multiselect('Categories to download', CATEGORIES, default=CATEGORIES)
-        submit_download = st.form_submit_button('Download / Refresh Selected Data', type='primary')
-    if submit_download:
-        jobs = [(s, c) for s in fetch_seasons for c in fetch_categories]
-        if not jobs:
-            st.warning('Select at least one season and category.')
-        else:
-            progress = st.progress(0)
-            for index, (season, category) in enumerate(jobs, 1):
-                with st.spinner(f'Downloading {season} / {category}...'):
-                    try:
-                        data = fetch_category(season, category)
-                        save_dataset(season, category, data)
-                        cached_combined.clear()
-                        cached_expected_statistics.clear()
-                        cached_status.clear()
-                        st.success(f'{season} / {category}: saved {len(data)} player rows')
-                    except Exception as exc:
-                        st.error(f'{season} / {category}: {type(exc).__name__}: {exc}')
-                progress.progress(index / len(jobs))
-                if index < len(jobs):
-                    time.sleep(2)
+with top_right:
+    with st.expander('⚙️ Custom Fantasy Scoring', expanded=False):
+        custom_scoring_panel()
 
-@st.fragment(run_every='5m')
-def refresh_completeness():
-    completeness_dashboard([f'{y}-{str(y + 1)[-2:]}' for y in range(2016, 2027)])
+bottom_left, bottom_right = st.columns(2)
+with bottom_left:
+  with st.expander('📥 Download / Refresh Data', expanded=False):
+      st.caption('Choose the exact season/category combinations to request. Existing downloads remain saved.')
+      download_now = datetime.now(ZoneInfo('America/New_York'))
+      download_year = download_now.year if download_now.month >= 10 else download_now.year - 1
+      fetch_default = f'{download_year}-{str(download_year + 1)[-2:]}'
+      download_seasons = [f'{y}-{str(y + 1)[-2:]}' for y in range(2016, 2027)]
+      with st.form('download_selection_form'):
+          fetch_seasons = st.multiselect('Seasons to download', download_seasons, default=[fetch_default] if fetch_default in download_seasons else download_seasons[-1:])
+          fetch_categories = st.multiselect('Categories to download', CATEGORIES, default=CATEGORIES)
+          submit_download = st.form_submit_button('Download / Refresh Selected Data', type='primary')
+      if submit_download:
+          jobs = [(s, c) for s in fetch_seasons for c in fetch_categories]
+          if not jobs:
+              st.warning('Select at least one season and category.')
+          else:
+              progress = st.progress(0)
+              for index, (season, category) in enumerate(jobs, 1):
+                  with st.spinner(f'Downloading {season} / {category}...'):
+                      try:
+                          data = fetch_category(season, category)
+                          save_dataset(season, category, data)
+                          cached_combined.clear()
+                          cached_expected_statistics.clear()
+                          cached_status.clear()
+                          st.success(f'{season} / {category}: saved {len(data)} player rows')
+                      except Exception as exc:
+                          st.error(f'{season} / {category}: {type(exc).__name__}: {exc}')
+                  progress.progress(index / len(jobs))
+                  if index < len(jobs):
+                      time.sleep(2)
 
-refresh_completeness()
+with bottom_right:
+    with st.expander('📋 Dashboard', expanded=False):
+        show_completeness = st.checkbox('Load completeness dashboard', key='nba_show_completeness')
+        if show_completeness:
+            completeness_dashboard([f'{y}-{str(y + 1)[-2:]}' for y in range(2016, 2027)])
 
-with st.expander('💾 Saved datasets'):
-    status = cached_status()
-    if status.empty:
-        st.info('No datasets downloaded yet.')
-    else:
-        st.dataframe(display_headers(status), height=460, hide_index=True, use_container_width=True)
-
-
-focus_fantasy_team = st.selectbox('🏆 Focus fantasy team', team_options, key='focus_fantasy_team')
+# Match the Fantasy Team selector width to the Download / Refresh Data panel.
+fantasy_team_col, _fantasy_team_spacer = st.columns(2)
+with fantasy_team_col:
+    focus_fantasy_team = st.selectbox('🏆 Fantasy Team', team_options, key='focus_fantasy_team')
 
 st.subheader('🏀 NBA Statistics')
 if not selected_seasons or not selected_categories:
@@ -652,8 +795,9 @@ else:
             df.loc[_has_position, 'Positions'] = _positions_by_player.loc[_has_position]
         # Filters are applied after computing the rank, so a team/position
         # filter does not renumber the league-wide player rankings.
-        search = st.text_input('Search players')
-        _f1, _f2, _f3, _f4, _f5 = st.columns(5)
+        _search_col, _f1, _f2, _f3, _f4, _f5 = st.columns([1.5, 1, 1, 1, 1, 1])
+        with _search_col:
+            search = st.text_input('Search player')
         with _f1:
             _saved_seasons = sorted(df['Season'].dropna().astype(str).unique(), reverse=True) if 'Season' in df else []
             _season_filter = st.multiselect('Seasons', _saved_seasons,
@@ -818,7 +962,7 @@ else:
         selection = st.dataframe(
             styled, height=600, hide_index=True, use_container_width=True,
             column_config=column_settings,
-            key=f"combined_stats_v084_{stat_mode.replace(' ', '_')}_{st.session_state.get('main_selection_epoch', 0)}",
+            key=f"combined_stats_v084_{stat_mode.replace(' ', '_')}",
             row_height=35,
             on_select='rerun', selection_mode='single-row',
         )
@@ -832,13 +976,9 @@ else:
             if 0 <= selected_row < len(table_data):
                 selected_player_id = str(table_data.iloc[selected_row]['Player ID'])
                 selected_player_season = table_data.iloc[selected_row]['Season'] if 'Season' in table_data else None
-                # Clear the checked row after routing its player to Quick View.
-                # Changing the widget key recreates the table with no selection.
-                st.session_state['regression_quick_view_request'] = selected_player_id
-                st.session_state['main_selection_epoch'] = (
-                    st.session_state.get('main_selection_epoch', 0) + 1
-                )
-                st.rerun(scope='app')
+                # The dataframe selection already triggers a Streamlit rerun.
+                # Route directly into the Quick View below, without forcing a
+                # second full-app rerun or clearing the selected row.
         @st.fragment
         def render_player_quick_view():
             if 'Player' in df.columns and 'Player ID' in df.columns:
