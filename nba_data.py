@@ -750,35 +750,44 @@ def calculate_fantasy(df):
 # COMBINE DATASETS
 # ============================================================
 
-def _combine_raw(seasons, categories):
-    tables = {}
+def _load_saved_datasets(seasons, categories):
+    """Fetch all requested payloads in one database round trip (SQLite or Neon)."""
+    seasons = tuple(dict.fromkeys(str(x) for x in seasons))
+    categories = tuple(dict.fromkeys(str(x) for x in categories))
+    if not seasons or not categories:
+        return {}
+    placeholders_s = ','.join('?' for _ in seasons)
+    placeholders_c = ','.join('?' for _ in categories)
+    with connection() as con:
+        rows = con.execute(
+            f'SELECT season, category, payload FROM datasets '
+            f'WHERE season IN ({placeholders_s}) AND category IN ({placeholders_c})',
+            seasons + categories,
+        ).fetchall()
+    result = {}
+    for season, category, payload in rows:
+        df = pd.read_json(io.StringIO(payload), orient='split', dtype={'Player ID': str})
+        if df.empty:
+            continue
+        df['Player ID'] = df['Player ID'].astype('string')
+        df['Season'] = pd.to_numeric(df['Season'], errors='coerce').astype('Int64')
+        result[(str(season), str(category))] = df
+    return result
 
+
+def _combine_raw(seasons, categories):
+    # One query instead of a new database connection for every season/category.
+    saved = _load_saved_datasets(seasons, categories)
+    tables = {}
     for category in CATEGORIES:
         if category not in categories:
             continue
-
-        frames = [
-            load_dataset(s, category)
-            for s in seasons
-        ]
-
-        frames = [
-            f
-            for f in frames
-            if f is not None and not f.empty
-        ]
-
+        frames = [saved[(str(season), category)] for season in seasons
+                  if (str(season), category) in saved]
         if frames:
-            table = pd.concat(
-                frames,
-                ignore_index=True,
-            )
-
+            table = pd.concat(frames, ignore_index=True)
             if table.duplicated(KEYS).any():
-                raise ValueError(
-                    f"Duplicate keys found in {category}."
-                )
-
+                raise ValueError(f'Duplicate keys found in {category}.')
             tables[category] = table
 
     if not tables:
@@ -1554,17 +1563,92 @@ def calculate_expected(df):
 # FINAL COMBINED TABLE
 # ============================================================
 
+# Increase this when the expected-statistics calculation itself changes.
+EXPECTED_CALC_VERSION = '2026-11-v1'
+
+
+def _expected_cache_table(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS expected_season_cache (
+        season TEXT NOT NULL PRIMARY KEY,
+        signature TEXT NOT NULL,
+        payload TEXT NOT NULL
+    )""")
+
+
 def expected_statistics_table():
-    """Historical expected stats shared by all filtered dashboard views."""
+    """Persist expected stats by season; only changed seasons are recalculated.
+
+    Each season depends on its own inputs and up to two prior seasons.
+    The first build computes all seasons together; later refreshes only compute
+    affected seasons and reuse completed historical results.
+    """
     with connection() as con:
-        seasons = [row[0] for row in con.execute('SELECT DISTINCT season FROM datasets')]
-    if not seasons:
+        _expected_cache_table(con)
+        source = con.execute('SELECT season, category, downloaded_at FROM datasets').fetchall()
+        existing = con.execute('SELECT season, signature, payload FROM expected_season_cache').fetchall()
+    if not source:
         return pd.DataFrame(columns=KEYS + EXPECTED_COLUMNS)
-    full = _combine_raw(seasons, CATEGORIES)
-    if full.empty:
-        return pd.DataFrame(columns=KEYS + EXPECTED_COLUMNS)
-    full = calculate_expected(full)
-    return full[KEYS + EXPECTED_COLUMNS]
+    from collections import defaultdict
+    import hashlib
+    stamps = defaultdict(list)
+    for season, category, updated in source:
+        stamps[str(season)].append((str(category), str(updated)))
+    labels = sorted(stamps, key=lambda x: int(str(x)[:4]))
+    cached = {str(season): (signature, payload) for season, signature, payload in existing}
+    signatures = {}
+    changed = []
+    for label in labels:
+        start = int(label[:4])
+        dependencies = [f'{year}-{str(year+1)[-2:]}' for year in range(start-2, start+1)]
+        inputs = [(dep, sorted(stamps.get(dep, []))) for dep in dependencies]
+        signature = hashlib.sha256(json.dumps([EXPECTED_CALC_VERSION, inputs], sort_keys=True).encode()).hexdigest()
+        signatures[label] = signature
+        if label not in cached or cached[label][0] != signature:
+            changed.append(label)
+
+    # On a fresh install calculate all seasons in one vectorized pass.
+    if changed:
+        if len(changed) == len(labels):
+            raw = _combine_raw(labels, CATEGORIES)
+            calculated = calculate_expected(raw) if not raw.empty else raw
+            by_year = {int(label[:4]) + 1: label for label in changed}
+            updated_frames = {label: group[KEYS + EXPECTED_COLUMNS].copy()
+                              for year, group in calculated.groupby('Season')
+                              if (label := by_year.get(int(year))) is not None}
+        else:
+            updated_frames = {}
+            for label in changed:
+                start = int(label[:4])
+                dependencies = [f'{year}-{str(year+1)[-2:]}' for year in range(start-2, start+1)]
+                raw = _combine_raw(dependencies, CATEGORIES)
+                if raw.empty:
+                    continue
+                calculated = calculate_expected(raw)
+                target = calculated.loc[calculated['Season'].eq(start+1), KEYS + EXPECTED_COLUMNS]
+                updated_frames[label] = target.copy()
+        with connection() as con:
+            _expected_cache_table(con)
+            for label, frame in updated_frames.items():
+                payload = frame.to_json(orient='split', date_format='iso')
+                con.execute("""INSERT INTO expected_season_cache (season, signature, payload)
+                    VALUES (?, ?, ?) ON CONFLICT (season) DO UPDATE SET
+                    signature = excluded.signature, payload = excluded.payload""",
+                    (label, signatures[label], payload))
+            con.commit()
+        cached.update({label: (signatures[label], frame.to_json(orient='split', date_format='iso'))
+                       for label, frame in updated_frames.items()})
+
+    frames = []
+    for label in labels:
+        item = cached.get(label)
+        if item is None or item[0] != signatures[label]:
+            continue
+        frame = pd.read_json(io.StringIO(item[1]), orient='split', dtype={'Player ID': str})
+        if not frame.empty:
+            frame['Player ID'] = frame['Player ID'].astype('string')
+            frame['Season'] = pd.to_numeric(frame['Season'], errors='coerce').astype('Int64')
+            frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=KEYS + EXPECTED_COLUMNS)
 
 
 def combined_table(seasons, categories, expected=None):

@@ -48,7 +48,7 @@ def dataset_revision():
 
 @st.cache_data(ttl=600, max_entries=2, show_spinner=False)
 def cached_expected_statistics(revision):
-    """Compute historical expected stats once, not for every filter combination."""
+    """Read persisted expected stats; rebuild only affected seasons after source changes."""
     from nba_data import expected_statistics_table
     return expected_statistics_table()
 
@@ -81,7 +81,7 @@ def season_end_year(values):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_quick_view_pool(seasons):
+def cached_quick_view_pool(seasons, revision):
     """Load the historical player pool once for Quick View interactions."""
     pool = cached_combined(seasons, tuple(CATEGORIES)).copy()
     if 'Player ID' in pool:
@@ -92,9 +92,9 @@ def cached_quick_view_pool(seasons):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_quick_player_rows(seasons, player_id):
+def cached_quick_player_rows(seasons, player_id, revision):
     """Cache one player's historical rows; avoid repeated full-table scans."""
-    pool = cached_quick_view_pool(seasons)
+    pool = cached_quick_view_pool(seasons, dataset_revision())
     if '_quick_id' not in pool or 'Season' not in pool.columns:
         return pool.iloc[0:0].copy()
     return pool.loc[pool['_quick_id'].eq(str(player_id))].drop(
@@ -103,7 +103,7 @@ def cached_quick_player_rows(seasons, player_id):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_quick_all_ranks(seasons, year, position_lookup=()):
+def cached_quick_all_ranks(seasons, year, position_lookup=(), revision=()):
     """Rank players by season-wide Fppg/Fpts metrics, overall and by primary position.
 
     position_lookup is an immutable (normalized name, primary position) tuple,
@@ -111,7 +111,7 @@ def cached_quick_all_ranks(seasons, year, position_lookup=()):
     """
     if year is None:
         return {}
-    pool = cached_quick_view_pool(seasons)
+    pool = cached_quick_view_pool(seasons, dataset_revision())
     metrics = ('Fppg', 'Fpts', 'xFppg', 'xFpts')
     if not {'_quick_year', '_quick_id'}.issubset(pool.columns):
         return {}
@@ -861,7 +861,7 @@ else:
                         # the sidebar's selected seasons/categories. The selected
                         # season is displayed first, followed by other years.
                         quick_seasons = tuple(sorted(set(cached_status()['Season'].dropna().astype(str))))
-                        player_rows = cached_quick_player_rows(quick_seasons, choice[1])
+                        player_rows = cached_quick_player_rows(quick_seasons, choice[1], dataset_revision())
                         # The year selector is scoped to the player, so switching
                         # players automatically selects that player's latest saved season.
                         season_values = (season_end_year(player_rows['Season'])
@@ -1029,7 +1029,7 @@ else:
                                     _pos_frame = _pos_frame.loc[_pos_frame['_primary'].isin(('PG', 'SG', 'SF', 'PF', 'C'))]
                                     _pos_frame = _pos_frame.drop_duplicates('_name', keep=False)
                                     _position_pairs = list(zip(_pos_frame['_name'], _pos_frame['_primary']))
-                                _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, tuple(sorted(_position_pairs)))
+                                _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, tuple(sorted(_position_pairs)), dataset_revision())
                                 season_ranks = _rank_maps.get(rank_stat, {}).get(rank_scope, {})
                                 rank_label = f'{rank_stat} Rank'
                                 summary = summary.copy()
