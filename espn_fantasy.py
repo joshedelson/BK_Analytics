@@ -71,20 +71,27 @@ def _request(session, url, cookie, swid, params, filter_payload=None):
     return result
 
 
-def fetch_fantasy(season, league_id, espn_s2, swid):
+def fetch_fantasy(season, league_id, espn_s2, swid, progress_callback=None):
     if not (str(season).isdigit() and str(league_id).isdigit()):
         raise ValueError('Season and League ID must be numbers.')
     if not espn_s2 or not swid:
         raise ValueError('ESPN login cookies are required for private leagues.')
+    def report(step, label):
+        if progress_callback is not None:
+            progress_callback(step, label)
+
     base = f'{ESPN_BASE}/{season}/segments/0/leagues/{league_id}'
     with requests.Session() as session:
         league = _request(session, base, espn_s2, swid,
                           {'view': 'mTeam'})
+        report(1, 'League teams downloaded')
         roster_league = _request(session, base, espn_s2, swid,
                                  {'view': 'mRoster'})
+        report(2, 'Fantasy rosters downloaded')
         kona = _request(session, base, espn_s2, swid,
                         {'scoringPeriodId':0,'view':'kona_player_info'},
                         {'players':{'limit':3000,'sortPercOwned':{'sortPriority':1,'sortAsc':False}}})
+        report(3, 'Player metadata downloaded')
         # ESPN fantasy league draft history, separate from the NBA draft.
         try:
             draft_response = _request(session, base, espn_s2, swid,
@@ -95,6 +102,7 @@ def fetch_fantasy(season, league_id, espn_s2, swid):
             draft_error = f'{type(exc).__name__}: {exc}'
         else:
             draft_error = ''
+    report(4, 'Draft request finished')
     draft_by_id = {
         str(pick['playerId']): pick
         for pick in draft_picks
@@ -162,6 +170,7 @@ def fetch_fantasy(season, league_id, espn_s2, swid):
                      'Availability': 'ROSTERED' if pid in roster_map else 'FA'})
     if not rows:
         raise ValueError('No players found in ESPN responses; verify authentication and season.')
+    report(5, 'ESPN players processed')
     return pd.DataFrame(rows), {'teams':len(team_names), 'rostered':len(roster_map), 'abbreviations': sum(bool(v) for v in team_abbrevs.values()), 'rostered_abbreviations': sum(bool(v.get('Fantasy Abbrev')) for v in roster_map.values()), 'draft_picks':len(draft_picks), 'draft_error':draft_error}
 
 
@@ -264,3 +273,148 @@ def player_news_fallback_url(espn_player_id):
     pid = str(espn_player_id).strip()
     return (f'https://www.espn.com/nba/player/_/id/{pid}'
             if pid.isdigit() else None)
+
+
+def fetch_player_injury_detail(espn_player_id, timeout=2.5):
+    """Best-effort ESPN Core NBA injury lookup for a single ESPN athlete ID.
+
+    Fantasy injury status is sourced from the league snapshot, not this endpoint.
+    Core responses can omit injury details/return dates or use reference links.
+    Returns (description, expected_return) or ('', '') when unavailable.
+    """
+    from urllib.parse import urlparse
+
+    pid = str(espn_player_id or '').strip()
+    if not pid.isdigit():
+        return '', ''
+    base = 'https://sports.core.api.espn.com'
+    url = f'{base}/v2/sports/basketball/leagues/nba/athletes/{pid}/injuries'
+    headers = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
+
+    def get_json(target, session):
+        parsed = urlparse(target)
+        if parsed.scheme != 'https' or parsed.netloc != 'sports.core.api.espn.com':
+            return {}
+        response = session.get(target, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+
+    def text_value(value):
+        if isinstance(value, dict):
+            return str(value.get('description') or value.get('displayName') or value.get('name') or '')
+        return str(value or '')
+
+    try:
+        with requests.Session() as session:
+            payload = get_json(url, session)
+            items = payload.get('items') or []
+            if not items and any(k in payload for k in ('status', 'details', 'type')):
+                items = [payload]
+            for item in items[:3]:
+                if not isinstance(item, dict):
+                    continue
+                entry = get_json(item['$ref'], session) if item.get('$ref') else item
+                details = entry.get('details') or {}
+                if not isinstance(details, dict):
+                    details = {}
+                description = (text_value(details.get('detail')) or
+                               text_value(details.get('description')) or
+                               text_value(entry.get('description')) or
+                               text_value(entry.get('type')))
+                date = (details.get('returnDate') or details.get('expectedReturnDate') or
+                        entry.get('returnDate') or entry.get('expectedReturnDate'))
+                if isinstance(date, dict):
+                    date = date.get('date') or date.get('displayValue')
+                if date:
+                    try:
+                        date = datetime.fromisoformat(str(date).replace('Z', '+00:00')).strftime('%b %d, %Y').replace(' 0', ' ')
+                    except (ValueError, TypeError):
+                        date = str(date)
+                if description or date:
+                    return description, str(date or '')
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        pass
+    return '', ''
+
+
+# Public ESPN NBA injury feed. IDs in fantasy league snapshots are NOT used
+# as ESPN Sports athlete IDs; name plus team must agree to avoid wrong players.
+def fetch_nba_injury_report(timeout=6):
+    """Return verified injury records indexed by (normalized name, NBA team)."""
+    endpoint = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries'
+    try:
+        response = requests.get(endpoint, headers={'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0'}, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get('code') or not isinstance(payload.get('injuries'), list):
+        return {}
+
+    def as_text(value):
+        if isinstance(value, dict):
+            return str(value.get('displayName') or value.get('description') or
+                       value.get('name') or value.get('detail') or '')
+        return str(value or '')
+
+    def first_date(*values):
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get('date') or value.get('displayValue') or value.get('value')
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:10]
+        return ''
+
+    def parse_injury(entry):
+        details = entry.get('details') or {}
+        if not isinstance(details, dict):
+            details = {}
+        injury = entry.get('injury') or {}
+        if not isinstance(injury, dict):
+            injury = {}
+        kind = as_text(details.get('type') or injury.get('type'))
+        side = as_text(details.get('side') or injury.get('side'))
+        detail = as_text(details.get('detail') or injury.get('detail'))
+        description = ' '.join(p for p in (side, kind, detail) if p).strip()
+        if not description:
+            description = as_text(details.get('description') or entry.get('description'))
+        date = first_date(entry.get('expectedReturnDate'), entry.get('returnDate'),
+                          entry.get('returnsAt'), details.get('expectedReturnDate'),
+                          details.get('returnDate'), details.get('returnsAt'))
+        comment = as_text(entry.get('shortComment') or entry.get('longComment') or
+                          details.get('shortComment') or details.get('longComment') or
+                          entry.get('comment'))
+        updated = first_date(entry.get('date'), entry.get('updatedAt'))
+        return {'description': description, 'expected_return': date,
+                'latest_update': comment, 'updated': updated}
+
+    result = {}
+    for group in payload['injuries']:
+        if not isinstance(group, dict):
+            continue
+        # ESPN's public feed groups by team name, but the authoritative
+        # abbreviation lives on each injury's athlete.team object.
+        team = group.get('team') or {}
+        group_abbr = str(team.get('abbreviation') or '').upper().strip() if isinstance(team, dict) else ''
+        entries = group.get('injuries') or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            athlete = entry.get('athlete') or {}
+            if not isinstance(athlete, dict):
+                continue
+            name = athlete.get('displayName') or athlete.get('fullName')
+            athlete_team = athlete.get('team') or {}
+            team_abbr = (str(athlete_team.get('abbreviation') or '').upper().strip()
+                         if isinstance(athlete_team, dict) else '') or group_abbr
+            if not name or not team_abbr:
+                continue
+            key = (_normalized_name(name), team_abbr)
+            record = parse_injury(entry)
+            if key not in result or (record['latest_update'] and not result[key]['latest_update']):
+                result[key] = record
+    return result

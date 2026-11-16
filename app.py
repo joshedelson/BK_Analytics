@@ -1,11 +1,12 @@
 import time
+import json
 import pandas as pd
 import streamlit as st
 from nba_data import CATEGORIES, DB_PATH, SCORING, combined_table, fetch_category, save_dataset, status_table
-from cloud_db import label as database_label
+from cloud_db import label as database_label, connect as scoring_db_connect
 import re
 import os
-from espn_fantasy import fetch_fantasy, save_fantasy, load_fantasy, merge_fantasy, fetch_player_news
+from espn_fantasy import fetch_fantasy, save_fantasy, load_fantasy, merge_fantasy, fetch_player_news, fetch_nba_injury_report
 from datetime import datetime, time as clock_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,12 +28,55 @@ SCORING_OPTIONS = dict(SCORING_LABELS)
 SCORING_OPTIONS.update({'OREB': 'Offensive Rebounds', 'DREB': 'Defensive Rebounds',
                         '3PA': 'Three-Pointers Attempted', 'PF': 'Personal Fouls',
                         'DD2': 'Double-Doubles', 'TD3': 'Triple-Doubles'})
+# Persist custom presets in the existing SQLite / PostgreSQL database.
+# This is loaded once per Streamlit session, not on every widget interaction.
+def load_scoring_presets():
+    presets = {'My ESPN League': dict(SCORING)}
+    try:
+        with scoring_db_connect() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS nba_scoring_presets (name TEXT PRIMARY KEY, rules_json TEXT NOT NULL)')
+            rows = conn.execute('SELECT name, rules_json FROM nba_scoring_presets').fetchall()
+        for name, raw in rows:
+            if name == 'My ESPN League':
+                continue  # Always preserve the built-in ESPN scoring rules.
+            data = json.loads(raw)
+            if isinstance(data, dict) and all(isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) for k, v in data.items()):
+                presets[name] = {k: float(v) for k, v in data.items()}
+    except Exception as exc:
+        st.warning(f'Could not load saved scoring presets: {exc}')
+    return presets
+
+
+def save_scoring_preset(name, rules):
+    with scoring_db_connect() as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS nba_scoring_presets (name TEXT PRIMARY KEY, rules_json TEXT NOT NULL)')
+        # DELETE + INSERT works consistently in both SQLite and PostgreSQL.
+        conn.execute('DELETE FROM nba_scoring_presets WHERE name = ?', (name,))
+        conn.execute('INSERT INTO nba_scoring_presets (name, rules_json) VALUES (?, ?)',
+                     (name, json.dumps(rules, sort_keys=True)))
+        conn.commit()
+
+
+def delete_scoring_preset(name):
+    with scoring_db_connect() as conn:
+        conn.execute('DELETE FROM nba_scoring_presets WHERE name = ?', (name,))
+        conn.commit()
+
+
 if 'nba_scoring_presets' not in st.session_state:
-    st.session_state.nba_scoring_presets = {'My ESPN League': dict(SCORING)}
+    st.session_state.nba_scoring_presets = load_scoring_presets()
 if 'nba_scoring_preset' not in st.session_state:
     st.session_state.nba_scoring_preset = 'My ESPN League'
 if 'nba_scoring_rules' not in st.session_state:
     st.session_state.nba_scoring_rules = dict(SCORING)
+if 'nba_scoring_draft' not in st.session_state:
+    st.session_state.nba_scoring_draft = dict(st.session_state.nba_scoring_rules)
+
+
+def active_scoring_signature():
+    """Stable cache key: only an activated saved preset changes calculations."""
+    return tuple(sorted((str(k), float(v)) for k, v in st.session_state.nba_scoring_rules.items()))
+
 
 
 def scoring_changed():
@@ -40,7 +84,8 @@ def scoring_changed():
     # persisted expected-stat cache untouched.
     for name in ('cached_combined', 'cached_main_fantasy_merge',
                  'cached_quick_view_pool', 'cached_quick_player_rows',
-                 'cached_quick_all_ranks'):
+                 'cached_quick_all_ranks', 'cached_fantasy_analysis',
+                 'cached_positive_regression_v094'):
         fn = globals().get(name)
         if fn is not None:
             fn.clear()
@@ -91,65 +136,76 @@ def custom_scoring_panel():
         st.session_state.nba_scoring_preset = st.session_state.pop('nba_pending_preset')
     selected = st.selectbox('Scoring preset', list(presets), key='nba_scoring_preset')
     if st.session_state.get('nba_last_scoring_preset') != selected:
+        # Choosing an existing saved preset activates it. Editing never does.
         st.session_state.nba_scoring_rules = dict(presets[selected])
-        for _key, _weight in presets[selected].items():
-            st.session_state[f'nba_weight_{_key}'] = float(_weight)
+        st.session_state.nba_scoring_draft = dict(presets[selected])
+        st.session_state.nba_scoring_editor_version = st.session_state.get('nba_scoring_editor_version', 0) + 1
         st.session_state.nba_last_scoring_preset = selected
         scoring_changed()
+    draft = st.session_state.nba_scoring_draft
+    version = st.session_state.get('nba_scoring_editor_version', 0)
+    st.caption(f'Active scoring: **{selected}** · Edits are drafts until saved.')
     with st.expander('Manage presets'):
-        preset_name = st.text_input('Preset name', key='nba_preset_name')
+        preset_name = st.text_input('New preset name', key='nba_preset_name')
         a, b = st.columns(2)
         if a.button('Save current as preset', key='nba_save_preset'):
-            if preset_name.strip():
-                presets[preset_name.strip()] = dict(st.session_state.nba_scoring_rules)
-                st.session_state.nba_pending_preset = preset_name.strip()
-                st.session_state.nba_last_scoring_preset = preset_name.strip()
-                st.rerun()
-            else:
+            name = preset_name.strip()
+            if not name:
                 st.warning('Enter a preset name first.')
-        if b.button('Reset to ESPN scoring', key='nba_reset_scoring'):
-            st.session_state.nba_scoring_rules = dict(SCORING)
-            for _key, _weight in SCORING.items():
-                st.session_state[f'nba_weight_{_key}'] = float(_weight)
-            scoring_changed()
+            elif name == 'My ESPN League':
+                st.warning('The built-in ESPN preset is protected. Choose another name.')
+            else:
+                try:
+                    save_scoring_preset(name, dict(draft))
+                except Exception as exc:
+                    st.error(f'Could not save scoring preset: {exc}')
+                else:
+                    presets[name] = dict(draft)
+                    st.session_state.nba_scoring_rules = dict(draft)
+                    st.session_state.nba_pending_preset = name
+                    scoring_changed()
+                    st.rerun()
+        if b.button('Discard edits', key='nba_discard_scoring'):
+            st.session_state.nba_scoring_draft = dict(presets[selected])
+            st.session_state.nba_scoring_editor_version = version + 1
             st.rerun()
         if selected != 'My ESPN League' and st.button('Delete selected preset', key='nba_delete_preset'):
-            del presets[selected]
-            st.session_state.nba_pending_preset = 'My ESPN League'
-            st.session_state.nba_last_scoring_preset = None
-            st.rerun()
-    rules = st.session_state.nba_scoring_rules
-    st.caption(f'{len(rules)} active rules · Select × to remove a rule')
-    keys = list(rules)
+            try:
+                delete_scoring_preset(selected)
+            except Exception as exc:
+                st.error(f'Could not delete scoring preset: {exc}')
+            else:
+                del presets[selected]
+                st.session_state.nba_pending_preset = 'My ESPN League'
+                st.session_state.nba_last_scoring_preset = None
+                st.rerun()
+    st.caption(f'{len(draft)} draft rules · Select × to remove a rule')
+    keys = list(draft)
     for offset in range(0, len(keys), 2):
         cols = st.columns(2)
         for col, key in zip(cols, keys[offset:offset + 2]):
             with col:
                 left, value, remove = st.columns([5, 2, 1], vertical_alignment='center')
                 left.markdown(f'**{SCORING_OPTIONS.get(key, key)}** `{key}`')
-                updated = value.number_input(key, value=float(rules[key]), step=0.5,
-                                             label_visibility='collapsed', key=f'nba_weight_{key}')
-                if updated != rules[key]:
-                    rules[key] = updated
-                    scoring_changed()
-                    st.rerun()
-                if remove.button('×', key=f'nba_remove_{key}', help=f'Remove {key}'):
-                    del rules[key]
-                    scoring_changed()
+                updated = value.number_input(key, value=float(draft[key]), step=0.5,
+                                             label_visibility='collapsed', key=f'nba_draft_{version}_{key}')
+                if updated != draft[key]:
+                    draft[key] = updated  # No cache invalidation, stats recalculation, or forced rerun.
+                if remove.button('×', key=f'nba_remove_{version}_{key}', help=f'Remove {key}'):
+                    del draft[key]
                     st.rerun()
     with st.expander('＋ Add or edit a scoring rule'):
-        choices = [k for k in SCORING_OPTIONS if k not in rules]
+        choices = [k for k in SCORING_OPTIONS if k not in draft]
         if choices:
             new_key = st.selectbox('Statistic', choices, format_func=lambda k: f'{SCORING_OPTIONS[k]} ({k})', key='nba_new_rule')
             new_weight = st.number_input('Points per statistic', value=1.0, step=0.5, key='nba_new_weight')
             if st.button('Add scoring rule', key='nba_add_rule'):
-                rules[new_key] = new_weight
-                scoring_changed()
+                draft[new_key] = new_weight
                 st.rerun()
         else:
             st.caption('All available statistics already have scoring rules.')
-    st.caption('Scoring changes recalculate fantasy totals from saved stats without redownloading. '
-               'Presets are kept for this Streamlit session; they do not change SQLite or the Cloud database.')
+    st.caption('Editing rules does not change player stats, regression projections, or trade values. '
+               'Save as a named preset to activate your changes. Selecting a saved preset activates it immediately.')
 
 
 with st.sidebar:
@@ -194,7 +250,7 @@ def cached_expected_statistics(revision):
 
 
 @st.cache_data(ttl=600, max_entries=12, show_spinner=False)
-def cached_combined(season_tuple, category_tuple, revision=None):
+def cached_combined(season_tuple, category_tuple, revision=None, scoring_signature=None):
     if revision is None:
         revision = dataset_revision()
     expected = cached_expected_statistics(revision)
@@ -203,13 +259,19 @@ def cached_combined(season_tuple, category_tuple, revision=None):
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
 def cached_main_fantasy_merge(season_tuple, category_tuple, fantasy_year, fantasy_updated, fantasy_snapshot, revision):
     """Avoid the expensive ESPN name-by-name merge on every Quick View click."""
-    source = cached_combined(season_tuple, category_tuple, revision)
+    source = cached_combined(season_tuple, category_tuple, revision, active_scoring_signature())
     return merge_fantasy(source, fantasy_snapshot, fantasy_year)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_player_news(espn_id):
     return fetch_player_news(espn_id)
+
+
+@st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
+def cached_nba_injury_report():
+    """Load ESPN's NBA injury feed once per hour, not once per player."""
+    return fetch_nba_injury_report()
 
 
 def season_end_year(values):
@@ -223,7 +285,7 @@ def season_end_year(values):
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_quick_view_pool(seasons, revision):
     """Load the historical player pool once for Quick View interactions."""
-    pool = cached_combined(seasons, tuple(CATEGORIES)).copy()
+    pool = cached_combined(seasons, tuple(CATEGORIES), revision, active_scoring_signature()).copy()
     if 'Player ID' in pool:
         pool['_quick_id'] = pool['Player ID'].astype(str)
     if 'Season' in pool:
@@ -234,7 +296,7 @@ def cached_quick_view_pool(seasons, revision):
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_quick_player_rows(seasons, player_id, revision):
     """Cache one player's historical rows; avoid repeated full-table scans."""
-    pool = cached_quick_view_pool(seasons, dataset_revision())
+    pool = cached_quick_view_pool(seasons, revision)
     if '_quick_id' not in pool or 'Season' not in pool.columns:
         return pool.iloc[0:0].copy()
     return pool.loc[pool['_quick_id'].eq(str(player_id))].drop(
@@ -251,7 +313,7 @@ def cached_quick_all_ranks(seasons, year, position_lookup=(), revision=()):
     """
     if year is None:
         return {}
-    pool = cached_quick_view_pool(seasons, dataset_revision())
+    pool = cached_quick_view_pool(seasons, revision)
     metrics = ('Fppg', 'Fpts', 'xFppg', 'xFpts')
     if not {'_quick_year', '_quick_id'}.issubset(pool.columns):
         return {}
@@ -283,6 +345,24 @@ def cached_quick_all_ranks(seasons, year, position_lookup=(), revision=()):
             'Pos': dict(zip(peers['_quick_id'], pos_ranks)),
         }
     return result
+
+
+@st.cache_data(ttl=600, max_entries=4, show_spinner=False)
+def cached_quick_position_pairs(fantasy_snapshot):
+    """Build ESPN position lookup once per fantasy roster update, not per player click."""
+    if fantasy_snapshot.empty or 'ESPN Player' not in fantasy_snapshot:
+        return ()
+    from espn_fantasy import _normalized_name
+    names = fantasy_snapshot['ESPN Player'].map(_normalized_name)
+    primary = (fantasy_snapshot['Default Position'].fillna('').astype(str).str.upper().str.strip()
+               if 'Default Position' in fantasy_snapshot else pd.Series('', index=fantasy_snapshot.index))
+    fallback = (fantasy_snapshot['Positions'].fillna('').astype(str).str.split(',').str[0].str.strip()
+                if 'Positions' in fantasy_snapshot else pd.Series('', index=fantasy_snapshot.index))
+    positions = primary.where(primary.isin(('PG', 'SG', 'SF', 'PF', 'C')), fallback)
+    lookup = pd.DataFrame({'name': names.to_numpy(), 'position': positions.to_numpy()})
+    lookup = lookup.loc[lookup['position'].isin(('PG', 'SG', 'SF', 'PF', 'C'))]
+    lookup = lookup.drop_duplicates('name', keep=False)
+    return tuple(sorted(zip(lookup['name'], lookup['position'])))
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -391,7 +471,7 @@ def nba_team_logo(abbreviation):
     abbr = {'GS': 'GSW', 'NY': 'NYK', 'SA': 'SAS', 'NO': 'NOP',
             'UTAH': 'UTA', 'PHO': 'PHX', 'BRK': 'BKN'}.get(abbr, abbr)
     team_id = NBA_TEAM_IDS.get(abbr)
-    return f'https://cdn.nba.com/logos/nba/{team_id}/primary/L/logo.svg' if team_id else None
+    return f'https://cdn.nba.com/logos/nba/{team_id}/global/L/logo.svg' if team_id else None
 
 # Display names are applied only to the UI and exported CSV.
 # SQLite keys and formula inputs keep their original names for compatibility.
@@ -685,12 +765,20 @@ with top_left:
           swid = secret_or_env('ESPN_SWID')
           refresh_espn = st.form_submit_button('Refresh ESPN Fantasy Data')
       if refresh_espn:
-          with st.spinner('Downloading ESPN league rosters and player metadata...'):
-              try:
-                  fantasy_frame, info = fetch_fantasy(fantasy_year, fantasy_league, cookie, swid)
+          _espn_progress = st.progress(0, text='Connecting to ESPN…')
+          _espn_status = st.empty()
+          def _espn_progress_update(step, label):
+              _espn_progress.progress(min(step / 7, 1.0), text=f'ESPN refresh: {label} ({step}/7)')
+              _espn_status.caption(label)
+          try:
+                  fantasy_frame, info = fetch_fantasy(
+                      fantasy_year, fantasy_league, cookie, swid,
+                      progress_callback=_espn_progress_update)
+                  _espn_progress_update(6, 'Saving ESPN snapshot')
                   save_fantasy(fantasy_year, fantasy_league, fantasy_frame)
                   cached_fantasy.clear()
                   cached_player_news.clear()
+                  _espn_progress_update(7, 'ESPN refresh complete')
                   st.success(f"Saved {len(fantasy_frame)} ESPN players, {info['rostered']} rostered entries, {info['teams']} fantasy teams, {info['abbreviations']} ESPN team abbreviations; {info['rostered_abbreviations']} rostered players assigned an abbreviation.")
                   if not info['abbreviations']:
                       st.warning('ESPN did not return team abbreviations. Check your league team settings in ESPN.')
@@ -701,8 +789,10 @@ with top_left:
                       st.warning('ESPN returned no draft picks. Check that the league draft is complete.')
 
                   st.rerun()
-              except Exception as exc:
-                  st.error(f'ESPN refresh failed: {type(exc).__name__}: {exc}')
+          except Exception as exc:
+              _espn_progress.empty()
+              _espn_status.empty()
+              st.error(f'ESPN refresh failed: {type(exc).__name__}: {exc}')
       if fantasy_updated:
           st.caption(f'Last ESPN refresh (UTC): {fantasy_updated}')
           if 'Draft Round' in fantasy_frame.columns:
@@ -769,7 +859,7 @@ if not selected_seasons or not selected_categories:
     st.info('Select at least one season and category in the sidebar.')
 else:
     try:
-        df = cached_combined(tuple(selected_seasons), tuple(selected_categories))
+        df = cached_combined(tuple(selected_seasons), tuple(selected_categories), scoring_signature=active_scoring_signature())
     except Exception as exc:
         st.error(f'Unable to combine saved datasets: {exc}')
         df = pd.DataFrame()
@@ -966,6 +1056,13 @@ else:
             row_height=35,
             on_select='rerun', selection_mode='single-row',
         )
+        export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
+        for c in percent_columns:
+            export_view[c] = export_view[c].map(
+                lambda v: '' if pd.isna(v) else f'{v:.2f}'.rstrip('0').rstrip('.') + '%')
+        st.download_button('Export current view to CSV', export_view.to_csv(index=False).encode('utf-8-sig'),
+                           file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
+
         st.caption(f'{len(df):,} available player-season rows • {len(df.columns)} columns • {database_label()}')
         if not fantasy_frame.empty:
             st.caption(f'ESPN fantasy matched {fantasy_matches:,} NBA player-season rows by unique player name • {fantasy_unmatched:,} unmatched player-season rows (ESPN fields blank).')
@@ -976,9 +1073,13 @@ else:
             if 0 <= selected_row < len(table_data):
                 selected_player_id = str(table_data.iloc[selected_row]['Player ID'])
                 selected_player_season = table_data.iloc[selected_row]['Season'] if 'Season' in table_data else None
-                # The dataframe selection already triggers a Streamlit rerun.
-                # Route directly into the Quick View below, without forcing a
-                # second full-app rerun or clearing the selected row.
+                # Only a NEW table selection changes Quick View. A persistent
+                # checked row must not override a later manual search.
+        _last_table_player = st.session_state.get('_last_main_table_player_id')
+        if selected_player_id != _last_table_player:
+            st.session_state['_last_main_table_player_id'] = selected_player_id
+            if selected_player_id is not None:
+                st.session_state['_pending_main_table_player_id'] = selected_player_id
         @st.fragment
         def render_player_quick_view():
             if 'Player' in df.columns and 'Player ID' in df.columns:
@@ -988,8 +1089,12 @@ else:
                         # Regression table can request a player from below this fragment.
                         # Consume once so ordinary Quick View navigation remains independent.
                         requested_id = st.session_state.pop('regression_quick_view_request', None)
+                        table_request = st.session_state.pop('_pending_main_table_player_id', None)
+                        # A request is consumed once; the search selectbox then
+                        # owns the active player until another table click.
+                        target_id = requested_id or table_request
                         current_index = next((i for i, option in enumerate(options)
-                                              if option[1] == (requested_id or selected_player_id)), None)
+                                              if option[1] == target_id), None) if target_id else None
                         if current_index is not None:
                             st.session_state['quick_view_player'] = options[current_index]
                         elif st.session_state.get('quick_view_player') not in options:
@@ -1043,61 +1148,78 @@ else:
                             else:
                                 st.caption('No headshot ID available')
 
-                            st.subheader(choice[0])
-                            if not overview_rows.empty:
-                                _identity_row = overview_rows.iloc[0]
-                                _nba_team = str(_identity_row.get('Team', '')).strip()
-                                _logo = nba_team_logo(_nba_team)
-                                if _nba_team and _nba_team.lower() not in ('nan', 'none'):
-                                    _logo_col, _team_col = st.columns([1, 3], gap='small', vertical_alignment='center')
-                                    with _logo_col:
-                                        if _logo:
-                                            st.image(_logo, width=36)
-                                    with _team_col:
-                                        st.markdown(f'**{_nba_team}**')
-                                _position = str(_identity_row.get('Positions', '')).strip()
-                                if not _position or _position.lower() in ('nan', 'none'):
-                                    _position = ''
-                                if not _position and not fantasy_frame.empty and 'Positions' in fantasy_frame:
-                                    from espn_fantasy import _normalized_name as _norm_position
-                                    _position_matches = cached_espn_player_lookup(fantasy_frame).get(_norm_position(choice[0]), [])
-                                    if _position_matches:
-                                        _position = str(_position_matches[0].get('Positions', '')).strip()
-                                _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce')
-                                _identity_bits = []
-                                if _position and _position.lower() not in ('nan', 'none'):
-                                    _identity_bits.append(f'Pos: {_position}')
-                                if pd.notna(_age):
-                                    _identity_bits.append(f'Age: {_age:.0f}')
-                                if _identity_bits:
-                                    st.caption(' · '.join(_identity_bits))
-
-                            # ESPN league draft position (not the NBA entry draft).
-                            # Historical player rows are matched by NBA ID, but
-                            # the draft pick is for the current ESPN league season.
-                            # Match the current ESPN player pool by normalized name.
-                            # This works even when the selected row is a historical
-                            # NBA season (which has no merged ESPN ID).
+                            # Compact identity block, matching the MLB Quick View layout.
+                            # Reuse the already-loaded overview and ESPN lookup; no new API calls.
+                            from html import escape as _html_escape
                             from espn_fantasy import _normalized_name, player_news_fallback_url
                             _player_name = str(choice[0])
-                            if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns:
-                                _matches = cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
-                                _draft_rows = pd.DataFrame(_matches) if len(_matches) == 1 else pd.DataFrame()
+                            _identity_row = overview_rows.iloc[0] if not overview_rows.empty else None
+                            _nba_team = str(_identity_row.get('Team', '')).strip() if _identity_row is not None else ''
+                            if _nba_team.lower() in ('nan', 'none'):
+                                _nba_team = ''
+                            _logo = nba_team_logo(_nba_team) if _nba_team else None
+                            _matches = (cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
+                                        if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns else [])
+                            _espn_row = _matches[0] if len(_matches) == 1 else {}
+                            _espn_id = str(_espn_row.get('ESPN ID', '') or '')
+                            _position = str(_identity_row.get('Positions', '')).strip() if _identity_row is not None else ''
+                            if _position.lower() in ('nan', 'none') or not _position:
+                                _position = str(_espn_row.get('Positions', '') or '').strip()
+                            if _position.lower() in ('nan', 'none'):
+                                _position = ''
+                            _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce') if _identity_row is not None else float('nan')
+                            _injury = str(_espn_row.get('Injury', '') or '').strip()
+                            if _injury.lower() in ('nan', 'none', 'healthy', 'active'):
+                                _injury = ''
+                            _fantasy_team = str(_espn_row.get('Fantasy Team', '') or '').strip()
+                            if _fantasy_team.lower() in ('nan', 'none'):
+                                _fantasy_team = ''
+                            _pos_team = f"<strong>{_html_escape(_position or '—')}</strong>"
+                            if _nba_team:
+                                _pos_team += ' &nbsp;|&nbsp; '
+                                if _logo:
+                                    _pos_team += (f'<img src="{_html_escape(_logo, quote=True)}" '
+                                                  'style="width:24px;height:24px;vertical-align:middle;margin-right:4px">')
+                                _pos_team += f'<strong>{_html_escape(_nba_team)}</strong>'
+                            _age_text = f'Age: {int(_age)}' if pd.notna(_age) else ''
+                            _rnd, _pick = _espn_row.get('Draft Round'), _espn_row.get('Draft Pick')
+                            if pd.notna(_rnd) and pd.notna(_pick):
+                                _draft_text = f'Round {int(_rnd)}, Pick {int(_pick)}'
+                                if pd.notna(_espn_row.get('Draft Overall')):
+                                    _draft_text += f" ({int(_espn_row['Draft Overall'])})"
                             else:
-                                _draft_rows = pd.DataFrame()
-                            _espn_id = None
-                            if not _draft_rows.empty:
-                                _draft = _draft_rows.iloc[0]
-                                _espn_id = str(_draft.get('ESPN ID', ''))
-                                _rnd, _pick = _draft.get('Draft Round'), _draft.get('Draft Pick')
-                                if pd.notna(_rnd) and pd.notna(_pick):
-                                    st.caption(f"🏆 Fantasy draft: Rnd {int(_rnd)}, Pick {int(_pick)}"
-                                               + (f" (Overall {int(_draft['Draft Overall'])})"
-                                                  if pd.notna(_draft.get('Draft Overall')) else ''))
-                                else:
-                                    st.caption('Fantasy draft: Not drafted / not available')
-                            else:
-                                st.caption('Fantasy draft: Player not matched to ESPN; refresh ESPN data.')
+                                _draft_text = '—'
+                            _team_text = _html_escape(_fantasy_team or '—')
+                            _injury_detail, _return_date, _latest_update = '', '', ''
+                            # Match ESPN's public injury report by BOTH player name and team.
+                            # Never pass a fantasy player ID to the ESPN Sports injury endpoint.
+                            if _injury and _nba_team:
+                                _injury_record = cached_nba_injury_report().get(
+                                    (_normalized_name(_player_name), _nba_team.upper()), {})
+                                _injury_detail = _injury_record.get('description', '')
+                                _return_date = _injury_record.get('expected_return', '')
+                                _latest_update = _injury_record.get('latest_update', '')
+                            _injury_text = _html_escape(
+                                f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
+                            )
+                            _return_text = _html_escape(_return_date or '—')
+                            _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
+                                            if _latest_update else '')
+                            # Assemble the HTML without indented multiline Markdown: Streamlit's
+                            # Markdown parser can render the closing </div> as literal text.
+                            _identity_html = (
+                                '<div style="line-height:1.45;font-size:0.91rem;">'
+                                f'<div style="font-size:1.25rem;font-weight:700;margin-bottom:8px;">{_html_escape(_player_name)}</div>'
+                                f'<div style="margin-bottom:6px;">{_pos_team}</div>'
+                                f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
+                                f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
+                                f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
+                                f'<div style="margin-top:10px;"><u>Injury:</u> {_injury_text}</div>'
+                                f'<div><u>Expected return:</u> {_return_text}</div>'
+                                f'{_update_html}'
+                                '</div>'
+                            )
+                            st.markdown(_identity_html, unsafe_allow_html=True)
 
                             with st.expander('Latest ESPN News', expanded=False):
                                 if _espn_id and _espn_id.isdigit():
@@ -1157,20 +1279,8 @@ else:
                                     st.markdown(f'**{season} - Overview**')
                                 # Compare with every saved player in the selected year;
                                 # rankings are cached per year and statistic.
-                                from espn_fantasy import _normalized_name as _rank_normalize
-                                _position_pairs = []
-                                if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame:
-                                    _pos_frame = fantasy_frame.copy()
-                                    _pos_frame['_name'] = _pos_frame['ESPN Player'].map(_rank_normalize)
-                                    _pos_col = (_pos_frame['Default Position'].fillna('').astype(str).str.upper().str.strip()
-                                                if 'Default Position' in _pos_frame else pd.Series('', index=_pos_frame.index))
-                                    _fallback = (_pos_frame['Positions'].fillna('').astype(str).str.split(',').str[0].str.strip()
-                                                 if 'Positions' in _pos_frame else pd.Series('', index=_pos_frame.index))
-                                    _pos_frame['_primary'] = _pos_col.where(_pos_col.isin(('PG', 'SG', 'SF', 'PF', 'C')), _fallback)
-                                    _pos_frame = _pos_frame.loc[_pos_frame['_primary'].isin(('PG', 'SG', 'SF', 'PF', 'C'))]
-                                    _pos_frame = _pos_frame.drop_duplicates('_name', keep=False)
-                                    _position_pairs = list(zip(_pos_frame['_name'], _pos_frame['_primary']))
-                                _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, tuple(sorted(_position_pairs)), dataset_revision())
+                                _position_pairs = cached_quick_position_pairs(fantasy_frame)
+                                _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, _position_pairs, dataset_revision())
                                 season_ranks = _rank_maps.get(rank_stat, {}).get(rank_scope, {})
                                 rank_label = f'{rank_stat} Rank'
                                 summary = summary.copy()
@@ -1209,24 +1319,17 @@ else:
                                                             ('TOV', 'xTO')] for stat in pair]
                                           if c in quick_pg]
                             if pg_columns:
-                                st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 38 * (len(player_rows) + 1) + 10), hide_index=True,
-                                             use_container_width=True)
+                                st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
+                                             row_height=35, hide_index=True, use_container_width=True)
         render_player_quick_view()
-        export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
-        for c in percent_columns:
-            export_view[c] = export_view[c].map(
-                lambda v: '' if pd.isna(v) else f'{v:.2f}'.rstrip('0').rstrip('.') + '%')
-        st.download_button('Export current view to CSV', export_view.to_csv(index=False).encode('utf-8-sig'),
-                           file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
-
 
 # Isolate fantasy filters from the expensive main table rerun. The source data
 # and full player pool are cached; only the small display is rebuilt on changes.
 from fantasy_analysis import fantasy_analysis_table
 
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_fantasy_analysis(season_tuple, category_tuple, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot):
-    source = cached_combined(season_tuple, category_tuple)
+def cached_fantasy_analysis(season_tuple, category_tuple, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot, scoring_signature):
+    source = cached_combined(season_tuple, category_tuple, scoring_signature=scoring_signature)
     return fantasy_analysis_table(source, fantasy_snapshot, fantasy_year)
 
 @st.fragment
@@ -1241,7 +1344,7 @@ def fantasy_team_analysis():
             _cached = _status['Season'].dropna().astype(str).unique().tolist()
             _dataset_stamp = tuple(_status[['Season', 'Category', 'Updated']].astype(str).itertuples(index=False, name=None))
             _table = cached_fantasy_analysis(tuple(sorted(_cached)), tuple(CATEGORIES),
-                                             fantasy_year, str(fantasy_updated), _dataset_stamp, fantasy_frame)
+                                             fantasy_year, str(fantasy_updated), _dataset_stamp, fantasy_frame, active_scoring_signature())
         except Exception as exc:
             st.warning(f'Fantasy analysis unavailable: {exc}')
             return
@@ -1369,9 +1472,9 @@ fantasy_team_analysis()
 
 
 @st.cache_data(ttl=600, max_entries=4, show_spinner=False)
-def cached_positive_regression_v094(seasons, categories, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot):
+def cached_positive_regression_v094(seasons, categories, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot, scoring_signature):
     from fantasy_analysis import positive_regression_table
-    source = cached_combined(seasons, categories)
+    source = cached_combined(seasons, categories, scoring_signature=scoring_signature)
     return positive_regression_table(source, fantasy_snapshot, fantasy_year)
 
 @st.fragment
@@ -1386,7 +1489,7 @@ def positive_regression_view():
             _seasons = tuple(sorted(_status['Season'].dropna().astype(str).unique().tolist()))
             _stamp = tuple(_status[['Season', 'Category', 'Updated']].astype(str).itertuples(index=False, name=None))
             data = cached_positive_regression_v094(_seasons, tuple(CATEGORIES), fantasy_year,
-                                              str(fantasy_updated), _stamp, fantasy_frame)
+                                              str(fantasy_updated), _stamp, fantasy_frame, active_scoring_signature())
         except Exception as exc:
             st.warning(f'Regression analysis unavailable: {exc}')
             return
@@ -1580,7 +1683,7 @@ def trade_calculator_view():
             seasons = tuple(sorted(status['Season'].dropna().astype(str).unique().tolist()))
             stamp = tuple(status[['Season', 'Category', 'Updated']].astype(str).itertuples(index=False, name=None))
             projections = cached_positive_regression_v094(
-                seasons, tuple(CATEGORIES), fantasy_year, str(fantasy_updated), stamp, fantasy_frame)
+                seasons, tuple(CATEGORIES), fantasy_year, str(fantasy_updated), stamp, fantasy_frame, active_scoring_signature())
         except Exception as exc:
             st.warning(f'Trade projections unavailable: {exc}')
             return
@@ -1604,7 +1707,7 @@ def trade_calculator_view():
             return
         from trade_calculator import suggest_trades
         # Reuse the cached NBA dataset: historical rank reputation needs no API call.
-        historical_stats = cached_combined(seasons, ('Standard',), stamp)
+        historical_stats = cached_combined(seasons, ('Standard',), stamp, active_scoring_signature())
         suggestions = suggest_trades(
             projections, focus_fantasy_team, outgoing, fantasy=fantasy_frame,
             historical_stats=historical_stats, current_season=fantasy_year, max_results=10)

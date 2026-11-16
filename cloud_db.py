@@ -70,7 +70,7 @@ def connect():
 
 def label():
     return (
-        "Cloud PostgreSQL"
+        "Supabase PostgreSQL"
         if database_url()
         else DB_PATH.name
     )
