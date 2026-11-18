@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0;background:transparent;overflow:hidden}iframe{display:block;width:100%;border:0}
+</style></head><body><iframe id="grid" title="MLB compact stats grid"></iframe><script>
+const grid=document.getElementById('grid');
+// Copy the app's own font into the table so it matches Streamlit's tables.
+let appFont=null;
+function appFontStyle(){
+ if(appFont!==null)return appFont;
+ appFont='';
+ try{
+  const pd=window.parent.document,css=[];
+  for(const sheet of pd.styleSheets){
+   let rules;try{rules=sheet.cssRules}catch(e){continue}
+   for(const r of rules){
+    if(r.type===5)css.push(r.cssText.replace(/url\((['"]?)([^'")]+)\1\)/g,
+     (m,q,u)=>/^(data:|https?:)/.test(u)?m:'url("'+new URL(u,sheet.href||pd.baseURI).href+'")'));
+   }
+  }
+  const family=window.parent.getComputedStyle(pd.body).fontFamily;
+  if(family)appFont='<style>'+css.join('\n')+' :root{--app-font:'+family+'}</style>';
+ }catch(e){}
+ return appFont;
+}
+function streamlit(type,payload){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type},payload||{}),'*');}
+window.addEventListener('message',e=>{
+ if(e.source===window.parent && e.data && e.data.type==='streamlit:render'){
+  const args=e.data.args||{};
+  const doc=(args.html||'').replace('<head>','<head>'+appFontStyle());
+  if(grid.srcdoc!==doc)grid.srcdoc=doc;
+  grid.style.height=(args.height||585)+'px';
+  streamlit('streamlit:setFrameHeight',{height:args.height||585});
+ }
+ if(e.source===grid.contentWindow && e.data && e.data.type==='mlb-player-click'){
+  streamlit('streamlit:setComponentValue',{value:{player_id:e.data.player_id,year:e.data.year,
+     kind:e.data.kind,nonce:e.data.nonce},dataType:'json'});
+ }
+});
+streamlit('streamlit:componentReady',{apiVersion:1});
+</script></body></html>
