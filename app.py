@@ -9,6 +9,11 @@ import os
 from espn_fantasy import fetch_fantasy, save_fantasy, load_fantasy, merge_fantasy, fetch_player_news, fetch_nba_injury_report
 from datetime import datetime, time as clock_time, timedelta, timezone
 from zoneinfo import ZoneInfo
+from pathlib import Path
+import streamlit.components.v1 as components
+from nba_compact_table import render_nba_html
+
+_nba_compact_click = components.declare_component('nba_compact_click', path=str(Path(__file__).resolve().parent / 'compact_click'))
 
 st.set_page_config(page_title='NBA Fantasy Analytics', page_icon='🏀', layout='wide')
 st.markdown('''<style>
@@ -854,474 +859,487 @@ fantasy_team_col, _fantasy_team_spacer = st.columns(2)
 with fantasy_team_col:
     focus_fantasy_team = st.selectbox('🏆 Fantasy Team', team_options, key='focus_fantasy_team')
 
-st.subheader('🏀 NBA Statistics')
-if not selected_seasons or not selected_categories:
-    st.info('Select at least one season and category in the sidebar.')
-else:
-    try:
-        df = cached_combined(tuple(selected_seasons), tuple(selected_categories), scoring_signature=active_scoring_signature())
-    except Exception as exc:
-        st.error(f'Unable to combine saved datasets: {exc}')
-        df = pd.DataFrame()
-    if df.empty:
-        st.info('No matching saved data yet. Download one or more datasets above.')
+@st.fragment
+def render_main_stats_section():
+    st.subheader('🏀 NBA Statistics')
+    if not selected_seasons or not selected_categories:
+        st.info('Select at least one season and category in the sidebar.')
     else:
-        if not fantasy_frame.empty:
-            df, fantasy_matches = cached_main_fantasy_merge(
-                tuple(selected_seasons), tuple(selected_categories), fantasy_year,
-                str(fantasy_updated), fantasy_frame, dataset_revision())
-            fantasy_unmatched = max(0, len(df) - fantasy_matches)
-        # Carry current ESPN eligible positions across saved historical seasons,
-        # but only for players uniquely matched to the ESPN player pool.
-        if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame and 'Positions' in fantasy_frame:
-            from espn_fantasy import _normalized_name as _espn_norm
-            _position_pool = fantasy_frame[['ESPN Player', 'Positions']].copy()
-            _position_pool['_key'] = _position_pool['ESPN Player'].map(_espn_norm)
-            _position_pool = _position_pool.loc[
-                _position_pool['_key'].ne('') & ~_position_pool['_key'].duplicated(keep=False)
-            ].set_index('_key')['Positions']
-            _positions_by_player = df['Player'].map(_espn_norm).map(_position_pool)
-            _has_position = _positions_by_player.notna() & _positions_by_player.astype(str).str.strip().ne('')
-            df.loc[_has_position, 'Positions'] = _positions_by_player.loc[_has_position]
-        # Filters are applied after computing the rank, so a team/position
-        # filter does not renumber the league-wide player rankings.
-        _search_col, _f1, _f2, _f3, _f4, _f5 = st.columns([1.5, 1, 1, 1, 1, 1])
-        with _search_col:
-            search = st.text_input('Search player')
-        with _f1:
-            _saved_seasons = sorted(df['Season'].dropna().astype(str).unique(), reverse=True) if 'Season' in df else []
-            _season_filter = st.multiselect('Seasons', _saved_seasons,
-                default=_saved_seasons[:1], key='main_season_filter_v46')
-        with _f2:
-            _fantasy_options = sorted(df['Fantasy Team'].dropna().astype(str).unique(), key=str.casefold) if 'Fantasy Team' in df else []
-            _fantasy_filter = st.selectbox('Fantasy team', ['All teams'] + _fantasy_options,
-                key='main_fantasy_filter_v39')
-        with _f3:
-            _eligible_filter = st.selectbox('Eligible position',
-                ['All', 'PG', 'SG', 'SF', 'PF', 'C', 'G', 'F'], key='main_position_filter_v39')
-        with _f4:
-            _sort_choices = [c for c in ('Fppg', 'Fpts', 'xFppg', 'xFpts', 'PTS', 'xPTS',
-                'REB', 'xREB', 'AST', 'xAST', 'STL', 'xSTL', 'BLK', 'xBLK',
-                'TOV', 'xTO', 'GP', 'MIN', 'AGE', 'FG%', 'xFG%', '3PT%', 'x3P%',
-                'FT%', 'xFT%') if c in df.columns]
-            _sort_stat = st.selectbox('Sort statistic', _sort_choices,
-                index=_sort_choices.index('Fppg') if 'Fppg' in _sort_choices else 0,
-                key='main_sort_stat_v39') if _sort_choices else None
-        with _f5:
-            _sort_order = st.selectbox('Sort Order', ['Descending', 'Ascending'],
-                key='main_sort_order_v39')
-        stat_mode = st.segmented_control('Stat display', ['Per Game', 'Totals'],
-            default='Per Game', key='stat_display_mode_v39') or 'Per Game'
-        # Always show headshots when a Player ID exists. No toggle.
-        table_data = as_per_game(df) if stat_mode == 'Per Game' else df.copy()
-        # Restrict the ranking pool to the seasons selected in the table.
-        # Do this BEFORE ranking, but BEFORE fantasy team, position and search
-        # filters so those filters preserve each player's league-wide rank.
-        if 'Season' in table_data:
-            table_data = table_data.loc[
-                table_data['Season'].astype(str).isin(_season_filter)
-            ].copy()
-        # Rank the selected-season pool using the chosen display mode and
-        # direction. Keep ties on the same rank; missing values stay unranked.
-        # Header-click sorting is presentation-only and does not change Rk.
-        if _sort_stat and _sort_stat in table_data:
-            _sort_numbers = pd.to_numeric(table_data[_sort_stat], errors='coerce')
-            table_data['Rk'] = _sort_numbers.rank(method='min',
-                ascending=_sort_order == 'Ascending').astype('Int64')
-            table_data['_sort_value'] = _sort_numbers
+        try:
+            df = cached_combined(tuple(selected_seasons), tuple(selected_categories), scoring_signature=active_scoring_signature())
+        except Exception as exc:
+            st.error(f'Unable to combine saved datasets: {exc}')
+            df = pd.DataFrame()
+        if df.empty:
+            st.info('No matching saved data yet. Download one or more datasets above.')
         else:
-            table_data['Rk'] = pd.Series(pd.NA, index=table_data.index, dtype='Int64')
-            table_data['_sort_value'] = pd.Series(float('nan'), index=table_data.index)
-        if _fantasy_filter != 'All teams' and 'Fantasy Team' in table_data:
-            table_data = table_data[table_data['Fantasy Team'].fillna('').astype(str).eq(_fantasy_filter)]
-        if _eligible_filter != 'All' and 'Positions' in table_data:
-            _pos_groups = {'G': {'PG', 'SG'}, 'F': {'SF', 'PF'}}
-            _wanted = _pos_groups.get(_eligible_filter, {_eligible_filter})
-            table_data = table_data[table_data['Positions'].fillna('').astype(str).map(
-                lambda x: bool(set(re.findall(r'\b(?:PG|SG|SF|PF|C)\b', x.upper())) & _wanted))]
-        if search and 'Player' in table_data:
-            table_data = table_data[table_data['Player'].astype(str).str.contains(
-                search, case=False, regex=False, na=False)]
-        table_data = table_data.sort_values('_sort_value',
-            ascending=_sort_order == 'Ascending', na_position='last', kind='stable')
-        # Preserve the filtered fantasy ownership mask for player-name styling.
-        filtered_fantasy_team = (table_data['Fantasy Team'].copy() if 'Fantasy Team' in table_data
-                                 else pd.Series('', index=table_data.index))
-        table_data = table_data.drop(columns=['_sort_value'])
-        # Show only ESPN-eligible positions and append injury status to the
-        # player's name. Keep the original df untouched for calculations.
-        if 'Player' in table_data.columns and 'Injury' in table_data.columns:
-            injury_labels = table_data['Injury'].fillna('').astype(str).str.strip()
-            injury_labels = injury_labels.where(~injury_labels.str.lower().isin(['nan', 'none', '<na>']), '')
-            table_data['Player'] = (table_data['Player'].fillna('').astype(str)
-                                    + injury_labels.map(lambda status: f' ({status})' if status else ''))
-        table_data = table_data.drop(columns=['Fantasy Team', 'Injury', 'Roster Slot', 'ESPN ID'], errors='ignore')
-        # Keep Usage in SQLite, but show only USG% in the combined table.
-        # Other categories and all expected-stat inputs are unaffected.
-        table_data = table_data.drop(
-            columns=[c for c in table_data.columns if c.startswith('Usage ')],
-            errors='ignore',
-        )
-        # Show ESPN's fantasy-team abbreviation, not the full team name.
-        # Older snapshots may lack this field; warn above and refresh ESPN.
-        abbrev = (table_data.pop('Fantasy Abbrev') if 'Fantasy Abbrev' in table_data.columns
-                  else pd.Series('', index=table_data.index))
-        abbrev = abbrev.fillna('').astype(str).str.strip().str.upper()
-        # A player without a fantasy owner is a free agent; historical seasons
-        # and unmatched ESPN names remain blank rather than falsely labeled FA.
-        if 'Fantasy Team' in df.columns:
-            free_agent = df['Fantasy Team'].fillna('').astype(str).eq('FA')
-            abbrev = abbrev.mask(free_agent & abbrev.eq(''), 'FA')
-        insert_at = list(table_data.columns).index('Team') + 1 if 'Team' in table_data else 0
-        table_data['Fantasy'] = abbrev
-        visible = display_headers(table_data)
-        column_settings = {}
-        if 'Player ID' in table_data.columns:
-            column_settings['Headshot'] = st.column_config.ImageColumn('Headshot', width='small')
-        column_settings['Player'] = st.column_config.TextColumn('Player', width=250)
-        # Display name · NBA team · eligible positions without brackets.
-        # The underlying table_data retains Team and Positions for filtering,
-        # exports, and Player Quick View row selection.
-        if 'Player' in visible:
-            _team_labels = table_data['Team'].fillna('').astype(str).str.strip() if 'Team' in table_data else pd.Series('', index=table_data.index)
-            _pos_labels = table_data['Positions'].fillna('').astype(str).str.strip() if 'Positions' in table_data else pd.Series('', index=table_data.index)
-            _identity = pd.Series([
-                ' · '.join(part for part in (team, pos) if part)
-                for team, pos in zip(_team_labels, _pos_labels)
-            ], index=table_data.index)
-            _focused_players = filtered_fantasy_team.fillna('').astype(str).str.casefold().eq(focus_fantasy_team.casefold())
-            visible['Player'] = (visible['Player'].fillna('').astype(str).to_numpy()
-                                 + _identity.map(lambda label: f' · {label}' if label else '').to_numpy())
-        visible = focused_stat_columns(visible)
-        # The native row-selection control appears before the first data column.
-        # Rk is therefore the first data column, followed by headshot and identity.
-        visible.insert(0, 'Rk', table_data['Rk'].to_numpy())
-        if 'Positions' in visible:
-            visible = visible.rename(columns={'Positions': 'Pos'})
-        _front = ['Rk', 'Headshot', 'Player', 'AGE', 'Season']
-        visible = visible[[c for c in _front if c in visible] +
-                          [c for c in visible if c not in _front and c not in ('Fantasy', 'Team', 'Pos')] +
-                          (['Fantasy'] if 'Fantasy' in visible else [])]
-        if 'Headshot' in column_settings:
-            visible.insert(1, 'Headshot', table_data['Player ID'].map(player_headshot).to_numpy())
-        # Display percentages as 45.2% instead of the underlying 0.452.
-        # Preserve the original values for calculations and fantasy comparisons.
-        percent_columns = [c for c in visible.columns if '%' in str(c)]
-        percent_view = visible.copy()
-        for c in percent_columns:
-            percent_view[c] = pd.to_numeric(percent_view[c], errors='coerce') * 100
-        # Use a stable key for each stat mode to avoid stale table layouts.
-        table_key = f'combined_stats_v17_{stat_mode.replace(" ", "_").lower()}'
-        # Pandas Styler defaults to six decimals for floating-point values.
-        # Explicitly format only numeric columns, leaving the underlying data
-        # (and CSV export) unchanged.  Strip unnecessary trailing zeroes.
-        numeric_columns = [
-            c for c in percent_view.select_dtypes(include='number').columns
-            if c not in ('Season', 'Player ID', 'Team ID', 'Rk')
-        ]
-        formats = {c: stat_format(c, stat_mode, c in percent_columns)
-                   for c in numeric_columns}
-        formats['Rk'] = lambda value: '' if pd.isna(value) else str(int(value))
-        if 'AGE' in percent_view:
-            formats['AGE'] = lambda value: '' if pd.isna(value) else f'{float(value):.0f}'
-        styled = percent_view.style.format(formats, na_rep='')
+            if not fantasy_frame.empty:
+                df, fantasy_matches = cached_main_fantasy_merge(
+                    tuple(selected_seasons), tuple(selected_categories), fantasy_year,
+                    str(fantasy_updated), fantasy_frame, dataset_revision())
+                fantasy_unmatched = max(0, len(df) - fantasy_matches)
+            # Carry current ESPN eligible positions across saved historical seasons,
+            # but only for players uniquely matched to the ESPN player pool.
+            if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame and 'Positions' in fantasy_frame:
+                from espn_fantasy import _normalized_name as _espn_norm
+                _position_pool = fantasy_frame[['ESPN Player', 'Positions']].copy()
+                _position_pool['_key'] = _position_pool['ESPN Player'].map(_espn_norm)
+                _position_pool = _position_pool.loc[
+                    _position_pool['_key'].ne('') & ~_position_pool['_key'].duplicated(keep=False)
+                ].set_index('_key')['Positions']
+                _positions_by_player = df['Player'].map(_espn_norm).map(_position_pool)
+                _has_position = _positions_by_player.notna() & _positions_by_player.astype(str).str.strip().ne('')
+                df.loc[_has_position, 'Positions'] = _positions_by_player.loc[_has_position]
+            # Filters are applied after computing the rank, so a team/position
+            # filter does not renumber the league-wide player rankings.
+            _search_col, _f1, _f2, _f3, _f4, _f5 = st.columns([1.5, 1, 1, 1, 1, 1])
+            with _search_col:
+                search = st.text_input('Search player')
+            with _f1:
+                _saved_seasons = sorted(df['Season'].dropna().astype(str).unique(), reverse=True) if 'Season' in df else []
+                _season_filter = st.multiselect('Seasons', _saved_seasons,
+                    default=_saved_seasons[:1], key='main_season_filter_v46')
+            with _f2:
+                _fantasy_options = sorted(df['Fantasy Team'].dropna().astype(str).unique(), key=str.casefold) if 'Fantasy Team' in df else []
+                _fantasy_filter = st.selectbox('Fantasy team', ['All teams'] + _fantasy_options,
+                    key='main_fantasy_filter_v39')
+            with _f3:
+                _eligible_filter = st.selectbox('Eligible position',
+                    ['All', 'PG', 'SG', 'SF', 'PF', 'C', 'G', 'F'], key='main_position_filter_v39')
+            with _f4:
+                _sort_choices = [c for c in ('Fppg', 'Fpts', 'xFppg', 'xFpts', 'PTS', 'xPTS',
+                    'REB', 'xREB', 'AST', 'xAST', 'STL', 'xSTL', 'BLK', 'xBLK',
+                    'TOV', 'xTO', 'GP', 'MIN', 'AGE', 'FG%', 'xFG%', '3PT%', 'x3P%',
+                    'FT%', 'xFT%') if c in df.columns]
+                _sort_stat = st.selectbox('Sort statistic', _sort_choices,
+                    index=_sort_choices.index('Fppg') if 'Fppg' in _sort_choices else 0,
+                    key='main_sort_stat_v39') if _sort_choices else None
+            with _f5:
+                _sort_order = st.selectbox('Sort Order', ['Descending', 'Ascending'],
+                    key='main_sort_order_v39')
+            stat_mode = st.segmented_control('Stat display', ['Per Game', 'Totals'],
+                default='Per Game', key='stat_display_mode_v39') or 'Per Game'
+            # Always show headshots when a Player ID exists. No toggle.
+            table_data = as_per_game(df) if stat_mode == 'Per Game' else df.copy()
+            # Restrict the ranking pool to the seasons selected in the table.
+            # Do this BEFORE ranking, but BEFORE fantasy team, position and search
+            # filters so those filters preserve each player's league-wide rank.
+            if 'Season' in table_data:
+                table_data = table_data.loc[
+                    table_data['Season'].astype(str).isin(_season_filter)
+                ].copy()
+            # Rank the selected-season pool using the chosen display mode and
+            # direction. Keep ties on the same rank; missing values stay unranked.
+            # Header-click sorting is presentation-only and does not change Rk.
+            if _sort_stat and _sort_stat in table_data:
+                _sort_numbers = pd.to_numeric(table_data[_sort_stat], errors='coerce')
+                table_data['Rk'] = _sort_numbers.rank(method='min',
+                    ascending=_sort_order == 'Ascending').astype('Int64')
+                table_data['_sort_value'] = _sort_numbers
+            else:
+                table_data['Rk'] = pd.Series(pd.NA, index=table_data.index, dtype='Int64')
+                table_data['_sort_value'] = pd.Series(float('nan'), index=table_data.index)
+            if _fantasy_filter != 'All teams' and 'Fantasy Team' in table_data:
+                table_data = table_data[table_data['Fantasy Team'].fillna('').astype(str).eq(_fantasy_filter)]
+            if _eligible_filter != 'All' and 'Positions' in table_data:
+                _pos_groups = {'G': {'PG', 'SG'}, 'F': {'SF', 'PF'}}
+                _wanted = _pos_groups.get(_eligible_filter, {_eligible_filter})
+                table_data = table_data[table_data['Positions'].fillna('').astype(str).map(
+                    lambda x: bool(set(re.findall(r'\b(?:PG|SG|SF|PF|C)\b', x.upper())) & _wanted))]
+            if search and 'Player' in table_data:
+                table_data = table_data[table_data['Player'].astype(str).str.contains(
+                    search, case=False, regex=False, na=False)]
+            table_data = table_data.sort_values('_sort_value',
+                ascending=_sort_order == 'Ascending', na_position='last', kind='stable')
+            # Preserve the filtered fantasy ownership mask for player-name styling.
+            filtered_fantasy_team = (table_data['Fantasy Team'].copy() if 'Fantasy Team' in table_data
+                                     else pd.Series('', index=table_data.index))
+            table_data = table_data.drop(columns=['_sort_value'])
+            # Retain injury codes for the combined Player cell before removing the
+            # source column from the visible statistics. Keep row/index alignment
+            # after the season, fantasy, position and search filters.
+            _compact_injury_codes = (table_data['Injury'].fillna('').astype(str).str.strip()
+                                     if 'Injury' in table_data.columns
+                                     else pd.Series('', index=table_data.index))
+            _compact_injury_codes = _compact_injury_codes.mask(
+                _compact_injury_codes.str.lower().isin(('nan', 'none', '<na>')), '')
+            # Show only ESPN-eligible positions and append injury status to the
+            # player's name. Keep the original df untouched for calculations.
+            if 'Player' in table_data.columns and 'Injury' in table_data.columns:
+                injury_labels = table_data['Injury'].fillna('').astype(str).str.strip()
+                injury_labels = injury_labels.where(~injury_labels.str.lower().isin(['nan', 'none', '<na>']), '')
+                table_data['Player'] = (table_data['Player'].fillna('').astype(str)
+                                        + injury_labels.map(lambda status: f' ({status})' if status else ''))
+            table_data = table_data.drop(columns=['Fantasy Team', 'Injury', 'Roster Slot', 'ESPN ID'], errors='ignore')
+            # Keep Usage in SQLite, but show only USG% in the combined table.
+            # Other categories and all expected-stat inputs are unaffected.
+            table_data = table_data.drop(
+                columns=[c for c in table_data.columns if c.startswith('Usage ')],
+                errors='ignore',
+            )
+            # Show ESPN's fantasy-team abbreviation, not the full team name.
+            # Older snapshots may lack this field; warn above and refresh ESPN.
+            abbrev = (table_data.pop('Fantasy Abbrev') if 'Fantasy Abbrev' in table_data.columns
+                      else pd.Series('', index=table_data.index))
+            abbrev = abbrev.fillna('').astype(str).str.strip().str.upper()
+            # A player without a fantasy owner is a free agent; historical seasons
+            # and unmatched ESPN names remain blank rather than falsely labeled FA.
+            if 'Fantasy Team' in df.columns:
+                free_agent = df['Fantasy Team'].fillna('').astype(str).eq('FA')
+                abbrev = abbrev.mask(free_agent & abbrev.eq(''), 'FA')
+            insert_at = list(table_data.columns).index('Team') + 1 if 'Team' in table_data else 0
+            table_data['Fantasy'] = abbrev
+            visible = display_headers(table_data)
+            column_settings = {}
+            if 'Player ID' in table_data.columns:
+                column_settings['Headshot'] = st.column_config.ImageColumn('Headshot', width='small')
+            column_settings['Player'] = st.column_config.TextColumn('Player', width=250)
+            # Display name · NBA team · eligible positions without brackets.
+            # The underlying table_data retains Team and Positions for filtering,
+            # exports, and Player Quick View row selection.
+            if 'Player' in visible:
+                _team_labels = table_data['Team'].fillna('').astype(str).str.strip() if 'Team' in table_data else pd.Series('', index=table_data.index)
+                _pos_labels = table_data['Positions'].fillna('').astype(str).str.strip() if 'Positions' in table_data else pd.Series('', index=table_data.index)
+                _identity = pd.Series([
+                    ' · '.join(part for part in (team, pos) if part)
+                    for team, pos in zip(_team_labels, _pos_labels)
+                ], index=table_data.index)
+                _focused_players = filtered_fantasy_team.fillna('').astype(str).str.casefold().eq(focus_fantasy_team.casefold())
+                visible['Player'] = (visible['Player'].fillna('').astype(str).to_numpy()
+                                     + _identity.map(lambda label: f' · {label}' if label else '').to_numpy())
+            visible = focused_stat_columns(visible)
+            # The native row-selection control appears before the first data column.
+            # Rk is therefore the first data column, followed by headshot and identity.
+            visible.insert(0, 'Rk', table_data['Rk'].to_numpy())
+            if 'Positions' in visible:
+                visible = visible.rename(columns={'Positions': 'Pos'})
+            _front = ['Rk', 'Headshot', 'Player', 'AGE', 'Season']
+            visible = visible[[c for c in _front if c in visible] +
+                              [c for c in visible if c not in _front and c not in ('Fantasy', 'Team', 'Pos')] +
+                              (['Fantasy'] if 'Fantasy' in visible else [])]
+            if 'Headshot' in column_settings:
+                visible.insert(1, 'Headshot', table_data['Player ID'].map(player_headshot).to_numpy())
+            # Display percentages as 45.2% instead of the underlying 0.452.
+            # Preserve the original values for calculations and fantasy comparisons.
+            percent_columns = [c for c in visible.columns if '%' in str(c)]
+            percent_view = visible.copy()
+            for c in percent_columns:
+                percent_view[c] = pd.to_numeric(percent_view[c], errors='coerce') * 100
+            # MLB v223 architecture: custom HTML/CSS virtualized grid, JS sorting,
+            # and a bidirectional compact_click component for Quick View selection.
+            # All existing filters, ranks, calculations, and CSV exports stay in Python.
+            compact_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
+            compact_view['Player ID'] = table_data['Player ID'].to_numpy() if 'Player ID' in table_data else None
+            compact_view['Season'] = table_data['Season'].to_numpy() if 'Season' in table_data else ''
+            compact_view['Team'] = table_data['Team'].fillna('').to_numpy() if 'Team' in table_data else ''
+            compact_view['Positions'] = table_data['Positions'].fillna('').to_numpy() if 'Positions' in table_data else ''
+            compact_view['Injury'] = _compact_injury_codes.to_numpy()
+            compact_view['Fantasy'] = abbrev.to_numpy()
+            compact_view['Headshot'] = (table_data['Player ID'].map(player_headshot).to_numpy()
+                                        if 'Player ID' in table_data else '')
+            compact_view['_focus'] = _focused_players.fillna(False).to_numpy()
+            compact_view['_name'] = (table_data['Player'].astype(str).str.replace(
+                r'\s+\((?:O|IR|DTD|D|Q|SUSP|OUT)\)$', '', regex=True).to_numpy())
+            # The combined Player cell replaces separate Team/Pos/Fantasy columns.
+            compact_view = compact_view.drop(columns=['Fantasy Team'], errors='ignore')
+            freeze = st.session_state.get('nba_compact_freeze', False)
+            html_doc = render_nba_html(
+                compact_view, selected_focus=focus_fantasy_team, freeze_player=freeze,
+                sort_stat='Rk', theme_bg=st.get_option('theme.backgroundColor') or '#0e1117',
+                theme_fg=st.get_option('theme.textColor') or '#fafafa',
+                theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
+                stat_mode=stat_mode, logo_url=nba_team_logo)
+            click = _nba_compact_click(
+                html=html_doc, height=min(585, 34 + 41 * len(compact_view)),
+                key='nba_main_compact_click')
+            selected_player_id = None
+            if isinstance(click, dict) and click.get('player_id'):
+                try:
+                    token = (int(click['player_id']), click.get('nonce'))
+                    if token != st.session_state.get('_nba_compact_last_click'):
+                        st.session_state['_nba_compact_last_click'] = token
+                        selected_player_id = str(token[0])
+                        st.session_state['_pending_main_table_player_id'] = selected_player_id
+                        st.session_state['_last_main_table_player_id'] = selected_player_id
+                        selected_year = int(click.get('year') or 0)
+                        if selected_year:
+                            st.session_state[f'quick_view_year_{selected_player_id}'] = selected_year
+                except (TypeError, ValueError):
+                    pass
+            # Compact footer: freeze toggle left, player-season metadata right.
+            # Place the CSS on the footer itself so the rule applies to the preceding table.
+            st.html('''<style>
+            /* The compact table iframe is followed immediately by this footer. */
+            div[data-testid="stElementContainer"]:has(.st-key-nba_main_compact_click) {
+                margin-bottom: -0.9rem !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(.st-key-nba_compact_freeze) {
+                align-items: center;
+                margin-top: -0.5rem;
+            }
+            </style>''')
+            _freeze_left, _meta_right = st.columns([1.6, 5], vertical_alignment='center', gap='small')
+            with _freeze_left:
+                st.toggle('Freeze player column', key='nba_compact_freeze',
+                          help='Keep player names and headshots visible while scrolling horizontally.')
+            with _meta_right:
+                _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · '
+                            f'{database_label()}')
+                if not fantasy_frame.empty:
+                    _summary += (f' · ESPN {fantasy_matches:,} matched / '
+                                 f'{fantasy_unmatched:,} unmatched')
+                st.markdown(f'<div style="text-align:right;color:#8ba2c4;font-size:0.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_summary}</div>', unsafe_allow_html=True)
+            export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
+            for c in percent_columns:
+                export_view[c] = export_view[c].map(
+                    lambda v: '' if pd.isna(v) else f'{v:.2f}'.rstrip('0').rstrip('.') + '%')
+            st.download_button('Export current view to CSV', export_view.to_csv(index=False).encode('utf-8-sig'),
+                               file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
 
-        # Preserve injury colors and shade only the Player cells belonging
-        # to the currently highlighted fantasy team.
-        def injury_name_style(value):
-            name = str(value)
-            if re.search(r'\s\(DTD\)(?=\s|$)', name, flags=re.IGNORECASE):
-                return 'color: #f4c542; font-weight: 700'
-            return 'color: #e53935' if re.search(
-                r'\s\((?:O|IR|D|Q|SUSP|OUT)\)(?=\s|$)', name, flags=re.IGNORECASE
-            ) else ''
-
-        if 'Player' in visible:
-            styled = styled.map(injury_name_style, subset=['Player'])
-            # A positional list avoids index-alignment issues after sorting/filtering.
-            _highlight_flags = _focused_players.fillna(False).to_numpy()
-            def highlight_fantasy_player_cells(column):
-                return ['background-color: #51321c' if highlighted else ''
-                        for highlighted in _highlight_flags]
-            styled = styled.apply(highlight_fantasy_player_cells, axis=0, subset=['Player'])
-        # Header labels are presentation-only: the underlying column names stay unchanged.
-        _selected_header = HEADER_NAMES.get(_sort_stat, _sort_stat) if _sort_stat else None
-        column_settings = stat_header_config(
-            percent_view.columns, selected=_selected_header,
-            descending=_sort_order == 'Descending', overrides=column_settings)
-        selection = st.dataframe(
-            styled, height=600, hide_index=True, use_container_width=True,
-            column_config=column_settings,
-            key=f"combined_stats_v084_{stat_mode.replace(' ', '_')}",
-            row_height=35,
-            on_select='rerun', selection_mode='single-row',
-        )
-        export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
-        for c in percent_columns:
-            export_view[c] = export_view[c].map(
-                lambda v: '' if pd.isna(v) else f'{v:.2f}'.rstrip('0').rstrip('.') + '%')
-        st.download_button('Export current view to CSV', export_view.to_csv(index=False).encode('utf-8-sig'),
-                           file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
-
-        st.caption(f'{len(df):,} available player-season rows • {len(df.columns)} columns • {database_label()}')
-        if not fantasy_frame.empty:
-            st.caption(f'ESPN fantasy matched {fantasy_matches:,} NBA player-season rows by unique player name • {fantasy_unmatched:,} unmatched player-season rows (ESPN fields blank).')
-        selected_player_id = None
-        selected_player_season = None
-        if selection.selection.rows and 'Player ID' in table_data.columns:
-            selected_row = selection.selection.rows[0]
-            if 0 <= selected_row < len(table_data):
-                selected_player_id = str(table_data.iloc[selected_row]['Player ID'])
-                selected_player_season = table_data.iloc[selected_row]['Season'] if 'Season' in table_data else None
-                # Only a NEW table selection changes Quick View. A persistent
-                # checked row must not override a later manual search.
-        _last_table_player = st.session_state.get('_last_main_table_player_id')
-        if selected_player_id != _last_table_player:
-            st.session_state['_last_main_table_player_id'] = selected_player_id
-            if selected_player_id is not None:
-                st.session_state['_pending_main_table_player_id'] = selected_player_id
-        @st.fragment
-        def render_player_quick_view():
-            if 'Player' in df.columns and 'Player ID' in df.columns:
-                with st.expander('🏀 Player Quick View', expanded=True):
-                    options = cached_player_options(df[['Player', 'Player ID']])
-                    if options:
-                        # Regression table can request a player from below this fragment.
-                        # Consume once so ordinary Quick View navigation remains independent.
-                        requested_id = st.session_state.pop('regression_quick_view_request', None)
-                        table_request = st.session_state.pop('_pending_main_table_player_id', None)
-                        # A request is consumed once; the search selectbox then
-                        # owns the active player until another table click.
-                        target_id = requested_id or table_request
-                        current_index = next((i for i, option in enumerate(options)
-                                              if option[1] == target_id), None) if target_id else None
-                        if current_index is not None:
-                            st.session_state['quick_view_player'] = options[current_index]
-                        elif st.session_state.get('quick_view_player') not in options:
-                            st.session_state['quick_view_player'] = options[0]
-                        _player_select_col, _year_select_col, _rank_select_col, _scope_select_col = st.columns([3, 1, 3, 1.4], vertical_alignment='bottom')
-                        with _player_select_col:
-                            choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
-                                                  key='quick_view_player')
-                        # Show every saved season for this player, independent of
-                        # the sidebar's selected seasons/categories. The selected
-                        # season is displayed first, followed by other years.
-                        quick_seasons = tuple(sorted(set(cached_status()['Season'].dropna().astype(str))))
-                        player_rows = cached_quick_player_rows(quick_seasons, choice[1], dataset_revision())
-                        # The year selector is scoped to the player, so switching
-                        # players automatically selects that player's latest saved season.
-                        season_values = (season_end_year(player_rows['Season'])
-                                         if 'Season' in player_rows.columns
-                                         else pd.Series(dtype='float64'))
-                        available_years = sorted({int(y) for y in season_values.dropna()}, reverse=True)
-                        with _year_select_col:
-                            if available_years:
-                                selected_year = st.selectbox(
-                                    'Year', available_years,
-                                    format_func=lambda y: f'{y - 1}-{str(y)[-2:]}',
-                                    key=f'quick_view_year_{choice[1]}',
-                                )
-                            else:
-                                st.selectbox('Year', ['No saved seasons'], disabled=True)
-                                selected_year = None
-                        with _rank_select_col:
-                            rank_stat = st.segmented_control(
-                                'Rank by', ('Fppg', 'Fpts', 'xFppg', 'xFpts'),
-                                default='Fppg', key='quick_view_rank_stat',
-                            ) or 'Fppg'
-                        with _scope_select_col:
-                            rank_scope = st.segmented_control(
-                                'Rank scope', ('All', 'Pos'), default='All',
-                                key='quick_view_rank_scope',
-                                help='All ranks against every player; Pos ranks against players with the same primary ESPN position.',
-                            ) or 'All'
-                        # Keep every saved season for the historical stats table; only
-                        # the overview and identity card follow the Year dropdown.
-                        overview_rows = (player_rows.loc[
-                            season_end_year(player_rows['Season']).eq(selected_year)
-                        ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
-                        photo, details = st.columns([1, 4])
-                        with photo:
-                            url = player_headshot(choice[1])
-                            if url:
-                                st.image(url, width=190)
-                            else:
-                                st.caption('No headshot ID available')
-
-                            # Compact identity block, matching the MLB Quick View layout.
-                            # Reuse the already-loaded overview and ESPN lookup; no new API calls.
-                            from html import escape as _html_escape
-                            from espn_fantasy import _normalized_name, player_news_fallback_url
-                            _player_name = str(choice[0])
-                            _identity_row = overview_rows.iloc[0] if not overview_rows.empty else None
-                            _nba_team = str(_identity_row.get('Team', '')).strip() if _identity_row is not None else ''
-                            if _nba_team.lower() in ('nan', 'none'):
-                                _nba_team = ''
-                            _logo = nba_team_logo(_nba_team) if _nba_team else None
-                            _matches = (cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
-                                        if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns else [])
-                            _espn_row = _matches[0] if len(_matches) == 1 else {}
-                            _espn_id = str(_espn_row.get('ESPN ID', '') or '')
-                            _position = str(_identity_row.get('Positions', '')).strip() if _identity_row is not None else ''
-                            if _position.lower() in ('nan', 'none') or not _position:
-                                _position = str(_espn_row.get('Positions', '') or '').strip()
-                            if _position.lower() in ('nan', 'none'):
-                                _position = ''
-                            _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce') if _identity_row is not None else float('nan')
-                            _injury = str(_espn_row.get('Injury', '') or '').strip()
-                            if _injury.lower() in ('nan', 'none', 'healthy', 'active'):
-                                _injury = ''
-                            _fantasy_team = str(_espn_row.get('Fantasy Team', '') or '').strip()
-                            if _fantasy_team.lower() in ('nan', 'none'):
-                                _fantasy_team = ''
-                            _pos_team = f"<strong>{_html_escape(_position or '—')}</strong>"
-                            if _nba_team:
-                                _pos_team += ' &nbsp;|&nbsp; '
-                                if _logo:
-                                    _pos_team += (f'<img src="{_html_escape(_logo, quote=True)}" '
-                                                  'style="width:24px;height:24px;vertical-align:middle;margin-right:4px">')
-                                _pos_team += f'<strong>{_html_escape(_nba_team)}</strong>'
-                            _age_text = f'Age: {int(_age)}' if pd.notna(_age) else ''
-                            _rnd, _pick = _espn_row.get('Draft Round'), _espn_row.get('Draft Pick')
-                            if pd.notna(_rnd) and pd.notna(_pick):
-                                _draft_text = f'Round {int(_rnd)}, Pick {int(_pick)}'
-                                if pd.notna(_espn_row.get('Draft Overall')):
-                                    _draft_text += f" ({int(_espn_row['Draft Overall'])})"
-                            else:
-                                _draft_text = '—'
-                            _team_text = _html_escape(_fantasy_team or '—')
-                            _injury_detail, _return_date, _latest_update = '', '', ''
-                            # Match ESPN's public injury report by BOTH player name and team.
-                            # Never pass a fantasy player ID to the ESPN Sports injury endpoint.
-                            if _injury and _nba_team:
-                                _injury_record = cached_nba_injury_report().get(
-                                    (_normalized_name(_player_name), _nba_team.upper()), {})
-                                _injury_detail = _injury_record.get('description', '')
-                                _return_date = _injury_record.get('expected_return', '')
-                                _latest_update = _injury_record.get('latest_update', '')
-                            _injury_text = _html_escape(
-                                f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
-                            )
-                            _return_text = _html_escape(_return_date or '—')
-                            _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
-                                            if _latest_update else '')
-                            # Assemble the HTML without indented multiline Markdown: Streamlit's
-                            # Markdown parser can render the closing </div> as literal text.
-                            _identity_html = (
-                                '<div style="line-height:1.45;font-size:0.91rem;">'
-                                f'<div style="font-size:1.25rem;font-weight:700;margin-bottom:8px;">{_html_escape(_player_name)}</div>'
-                                f'<div style="margin-bottom:6px;">{_pos_team}</div>'
-                                f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
-                                f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
-                                f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
-                                f'<div style="margin-top:10px;"><u>Injury:</u> {_injury_text}</div>'
-                                f'<div><u>Expected return:</u> {_return_text}</div>'
-                                f'{_update_html}'
-                                '</div>'
-                            )
-                            st.markdown(_identity_html, unsafe_allow_html=True)
-
-                            with st.expander('Latest ESPN News', expanded=False):
-                                if _espn_id and _espn_id.isdigit():
-                                    try:
-                                        _articles = cached_player_news(_espn_id)
-                                        if _articles:
-                                            # Scroll only the news, keeping it inside Player Quick View.
-                                            # Height shows approximately one story at a time.
-                                            with st.container(height=240, border=True):
-                                                for _index, _item in enumerate(_articles):
-                                                    if _index:
-                                                        st.divider()
-                                                    st.markdown(f"**{_item['title']}**")
-                                                    if _item.get('date'):
-                                                        st.caption(f"{_item.get('source', 'ESPN')} · {_item['date']} UTC")
-                                                    if _item.get('summary'):
-                                                        st.caption(_item['summary'])
-                                                    if _item.get('url'):
-                                                        st.link_button('Read on ESPN', _item['url'])
-                                        else:
-                                            st.caption('No news returned by the ESPN Fantasy news endpoint.')
-                                    except Exception as _news_error:
-                                        st.caption(f'ESPN Fantasy news unavailable: {type(_news_error).__name__}.')
-                                    _fallback = player_news_fallback_url(_espn_id)
-                                    if _fallback:
-                                        st.link_button('Open ESPN player page / news', _fallback)
+            def render_player_quick_view():
+                if 'Player' in df.columns and 'Player ID' in df.columns:
+                    with st.expander('🏀 Player Quick View', expanded=True):
+                        options = cached_player_options(df[['Player', 'Player ID']])
+                        if options:
+                            # Regression table can request a player from below this fragment.
+                            # Consume once so ordinary Quick View navigation remains independent.
+                            requested_id = st.session_state.pop('regression_quick_view_request', None)
+                            table_request = st.session_state.pop('_pending_main_table_player_id', None)
+                            # A request is consumed once; the search selectbox then
+                            # owns the active player until another table click.
+                            target_id = requested_id or table_request
+                            current_index = next((i for i, option in enumerate(options)
+                                                  if option[1] == target_id), None) if target_id else None
+                            if current_index is not None:
+                                st.session_state['quick_view_player'] = options[current_index]
+                            elif st.session_state.get('quick_view_player') not in options:
+                                st.session_state['quick_view_player'] = options[0]
+                            _player_select_col, _year_select_col, _rank_select_col, _scope_select_col = st.columns([3, 1, 3, 1.4], vertical_alignment='bottom')
+                            with _player_select_col:
+                                choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
+                                                      key='quick_view_player')
+                            # Show every saved season for this player, independent of
+                            # the sidebar's selected seasons/categories. The selected
+                            # season is displayed first, followed by other years.
+                            quick_seasons = tuple(sorted(set(cached_status()['Season'].dropna().astype(str))))
+                            player_rows = cached_quick_player_rows(quick_seasons, choice[1], dataset_revision())
+                            # The year selector is scoped to the player, so switching
+                            # players automatically selects that player's latest saved season.
+                            season_values = (season_end_year(player_rows['Season'])
+                                             if 'Season' in player_rows.columns
+                                             else pd.Series(dtype='float64'))
+                            available_years = sorted({int(y) for y in season_values.dropna()}, reverse=True)
+                            with _year_select_col:
+                                if available_years:
+                                    selected_year = st.selectbox(
+                                        'Year', available_years,
+                                        format_func=lambda y: f'{y - 1}-{str(y)[-2:]}',
+                                        key=f'quick_view_year_{choice[1]}',
+                                    )
                                 else:
-                                    st.caption('Refresh ESPN data to enable player news.')
-                        with details:
-                            # Compact season summary instead of the former overview table.
-                            # The selected season is the first row, followed by saved history.
-                            per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
-                                             'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
-                            rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
-                            quick_pg = player_rows.copy()
-                            games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
-                                     if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
-                            for col in per_game_cols + ['MIN']:
-                                if col in quick_pg:
-                                    quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
+                                    st.selectbox('Year', ['No saved seasons'], disabled=True)
+                                    selected_year = None
+                            with _rank_select_col:
+                                rank_stat = st.segmented_control(
+                                    'Rank by', ('Fppg', 'Fpts', 'xFppg', 'xFpts'),
+                                    default='Fppg', key='quick_view_rank_stat',
+                                ) or 'Fppg'
+                            with _scope_select_col:
+                                rank_scope = st.segmented_control(
+                                    'Rank scope', ('All', 'Pos'), default='All',
+                                    key='quick_view_rank_scope',
+                                    help='All ranks against every player; Pos ranks against players with the same primary ESPN position.',
+                                ) or 'All'
+                            # Keep every saved season for the historical stats table; only
+                            # the overview and identity card follow the Year dropdown.
+                            overview_rows = (player_rows.loc[
+                                season_end_year(player_rows['Season']).eq(selected_year)
+                            ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
+                            photo, details = st.columns([1, 4])
+                            with photo:
+                                url = player_headshot(choice[1])
+                                if url:
+                                    st.image(url, width=190)
+                                else:
+                                    st.caption('No headshot ID available')
 
-                            def quick_display(frame, columns):
-                                view = frame[columns].copy()
-                                for col in columns:
-                                    if col in rate_cols or col == 'USG%':
-                                        view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                            lambda v: '' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
-                                    elif col not in ('Season', 'Team', 'Positions'):
-                                        view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                            lambda v: '' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
-                                return view
+                                # Compact identity block, matching the MLB Quick View layout.
+                                # Reuse the already-loaded overview and ESPN lookup; no new API calls.
+                                from html import escape as _html_escape
+                                from espn_fantasy import _normalized_name, player_news_fallback_url
+                                _player_name = str(choice[0])
+                                _identity_row = overview_rows.iloc[0] if not overview_rows.empty else None
+                                _nba_team = str(_identity_row.get('Team', '')).strip() if _identity_row is not None else ''
+                                if _nba_team.lower() in ('nan', 'none'):
+                                    _nba_team = ''
+                                _logo = nba_team_logo(_nba_team) if _nba_team else None
+                                _matches = (cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
+                                            if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns else [])
+                                _espn_row = _matches[0] if len(_matches) == 1 else {}
+                                _espn_id = str(_espn_row.get('ESPN ID', '') or '')
+                                _position = str(_identity_row.get('Positions', '')).strip() if _identity_row is not None else ''
+                                if _position.lower() in ('nan', 'none') or not _position:
+                                    _position = str(_espn_row.get('Positions', '') or '').strip()
+                                if _position.lower() in ('nan', 'none'):
+                                    _position = ''
+                                _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce') if _identity_row is not None else float('nan')
+                                _injury = str(_espn_row.get('Injury', '') or '').strip()
+                                if _injury.lower() in ('nan', 'none', 'healthy', 'active'):
+                                    _injury = ''
+                                _fantasy_team = str(_espn_row.get('Fantasy Team', '') or '').strip()
+                                if _fantasy_team.lower() in ('nan', 'none'):
+                                    _fantasy_team = ''
+                                _pos_team = f"<strong>{_html_escape(_position or '—')}</strong>"
+                                if _nba_team:
+                                    _pos_team += ' &nbsp;|&nbsp; '
+                                    if _logo:
+                                        _pos_team += (f'<img src="{_html_escape(_logo, quote=True)}" '
+                                                      'style="width:24px;height:24px;vertical-align:middle;margin-right:4px">')
+                                    _pos_team += f'<strong>{_html_escape(_nba_team)}</strong>'
+                                _age_text = f'Age: {int(_age)}' if pd.notna(_age) else ''
+                                _rnd, _pick = _espn_row.get('Draft Round'), _espn_row.get('Draft Pick')
+                                if pd.notna(_rnd) and pd.notna(_pick):
+                                    _draft_text = f'Round {int(_rnd)}, Pick {int(_pick)}'
+                                    if pd.notna(_espn_row.get('Draft Overall')):
+                                        _draft_text += f" ({int(_espn_row['Draft Overall'])})"
+                                else:
+                                    _draft_text = '—'
+                                _team_text = _html_escape(_fantasy_team or '—')
+                                _injury_detail, _return_date, _latest_update = '', '', ''
+                                # Match ESPN's public injury report by BOTH player name and team.
+                                # Never pass a fantasy player ID to the ESPN Sports injury endpoint.
+                                if _injury and _nba_team:
+                                    _injury_record = cached_nba_injury_report().get(
+                                        (_normalized_name(_player_name), _nba_team.upper()), {})
+                                    _injury_detail = _injury_record.get('description', '')
+                                    _return_date = _injury_record.get('expected_return', '')
+                                    _latest_update = _injury_record.get('latest_update', '')
+                                _injury_text = _html_escape(
+                                    f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
+                                )
+                                _return_text = _html_escape(_return_date or '—')
+                                _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
+                                                if _latest_update else '')
+                                # Assemble the HTML without indented multiline Markdown: Streamlit's
+                                # Markdown parser can render the closing </div> as literal text.
+                                _identity_html = (
+                                    '<div style="line-height:1.45;font-size:0.91rem;">'
+                                    f'<div style="font-size:1.25rem;font-weight:700;margin-bottom:8px;">{_html_escape(_player_name)}</div>'
+                                    f'<div style="margin-bottom:6px;">{_pos_team}</div>'
+                                    f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
+                                    f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
+                                    f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
+                                    f'<div style="margin-top:10px;"><u>Injury:</u> {_injury_text}</div>'
+                                    f'<div><u>Expected return:</u> {_return_text}</div>'
+                                    f'{_update_html}'
+                                    '</div>'
+                                )
+                                st.markdown(_identity_html, unsafe_allow_html=True)
 
-                            if not overview_rows.empty:
-                                summary = overview_rows.iloc[0]
-                                season = str(summary.get('Season', '')).strip()
-                                if season and season.lower() not in ('nan', 'none'):
-                                    st.markdown(f'**{season} - Overview**')
-                                # Compare with every saved player in the selected year;
-                                # rankings are cached per year and statistic.
-                                _position_pairs = cached_quick_position_pairs(fantasy_frame)
-                                _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, _position_pairs, dataset_revision())
-                                season_ranks = _rank_maps.get(rank_stat, {}).get(rank_scope, {})
-                                rank_label = f'{rank_stat} Rank'
-                                summary = summary.copy()
-                                summary[rank_label] = season_ranks.get(choice[1], float('nan'))
-                                summary_stats = [('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'), (rank_label, rank_label),
-                                                 ('Fpts', 'Fpts'), ('xFpts', 'xFpts'),
-                                                 ('Fppg', 'Fppg'), ('xFppg', 'xFppg')]
-                                available_stats = [(key, label) for key, label in summary_stats if key in summary.index]
-                                for offset in range(0, len(available_stats), 4):
-                                    metric_cols = st.columns(4)
-                                    for metric_col, (key, label) in zip(metric_cols, available_stats[offset:offset + 4]):
-                                        value = pd.to_numeric(summary.get(key), errors='coerce')
-                                        if key == 'MIN':
-                                            gp = pd.to_numeric(summary.get('GP'), errors='coerce')
-                                            value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
-                                        elif key == 'USG%' and pd.notna(value):
-                                            value *= 100
-                                        if pd.isna(value):
-                                            shown = '—'
-                                        elif key == 'USG%':
-                                            shown = f'{value:.1f}%'
-                                        elif key in ('Fppg', 'xFppg'):
-                                            shown = f'{value:,.1f}'
-                                        elif key in ('GP', 'Fpts', 'xFpts', rank_label):
-                                            shown = f'{value:,.0f}'
-                                        else:
-                                            shown = f'{value:,.1f}'
-                                        metric_col.metric(label, shown)
+                                with st.expander('Latest ESPN News', expanded=False):
+                                    if _espn_id and _espn_id.isdigit():
+                                        try:
+                                            _articles = cached_player_news(_espn_id)
+                                            if _articles:
+                                                # Scroll only the news, keeping it inside Player Quick View.
+                                                # Height shows approximately one story at a time.
+                                                with st.container(height=240, border=True):
+                                                    for _index, _item in enumerate(_articles):
+                                                        if _index:
+                                                            st.divider()
+                                                        st.markdown(f"**{_item['title']}**")
+                                                        if _item.get('date'):
+                                                            st.caption(f"{_item.get('source', 'ESPN')} · {_item['date']} UTC")
+                                                        if _item.get('summary'):
+                                                            st.caption(_item['summary'])
+                                                        if _item.get('url'):
+                                                            st.link_button('Read on ESPN', _item['url'])
+                                            else:
+                                                st.caption('No news returned by the ESPN Fantasy news endpoint.')
+                                        except Exception as _news_error:
+                                            st.caption(f'ESPN Fantasy news unavailable: {type(_news_error).__name__}.')
+                                        _fallback = player_news_fallback_url(_espn_id)
+                                        if _fallback:
+                                            st.link_button('Open ESPN player page / news', _fallback)
+                                    else:
+                                        st.caption('Refresh ESPN data to enable player news.')
+                            with details:
+                                # Compact season summary instead of the former overview table.
+                                # The selected season is the first row, followed by saved history.
+                                per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
+                                                 'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
+                                rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
+                                quick_pg = player_rows.copy()
+                                games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
+                                         if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
+                                for col in per_game_cols + ['MIN']:
+                                    if col in quick_pg:
+                                        quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
 
-                            st.markdown('**Season - Stats**')
-                            pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
-                                          [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
-                                                            ('FT%', 'xFT%'), ('PTS', 'xPTS'),
-                                                            ('REB', 'xREB'), ('AST', 'xAST'),
-                                                            ('STL', 'xSTL'), ('BLK', 'xBLK'),
-                                                            ('TOV', 'xTO')] for stat in pair]
-                                          if c in quick_pg]
-                            if pg_columns:
-                                st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
-                                             row_height=35, hide_index=True, use_container_width=True)
-        render_player_quick_view()
+                                def quick_display(frame, columns):
+                                    view = frame[columns].copy()
+                                    for col in columns:
+                                        if col in rate_cols or col == 'USG%':
+                                            view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                                lambda v: '' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
+                                        elif col not in ('Season', 'Team', 'Positions'):
+                                            view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                                lambda v: '' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
+                                    return view
+
+                                if not overview_rows.empty:
+                                    summary = overview_rows.iloc[0]
+                                    season = str(summary.get('Season', '')).strip()
+                                    if season and season.lower() not in ('nan', 'none'):
+                                        st.markdown(f'**{season} - Overview**')
+                                    # Compare with every saved player in the selected year;
+                                    # rankings are cached per year and statistic.
+                                    _position_pairs = cached_quick_position_pairs(fantasy_frame)
+                                    _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, _position_pairs, dataset_revision())
+                                    season_ranks = _rank_maps.get(rank_stat, {}).get(rank_scope, {})
+                                    rank_label = f'{rank_stat} Rank'
+                                    summary = summary.copy()
+                                    summary[rank_label] = season_ranks.get(choice[1], float('nan'))
+                                    summary_stats = [('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'), (rank_label, rank_label),
+                                                     ('Fpts', 'Fpts'), ('xFpts', 'xFpts'),
+                                                     ('Fppg', 'Fppg'), ('xFppg', 'xFppg')]
+                                    available_stats = [(key, label) for key, label in summary_stats if key in summary.index]
+                                    for offset in range(0, len(available_stats), 4):
+                                        metric_cols = st.columns(4)
+                                        for metric_col, (key, label) in zip(metric_cols, available_stats[offset:offset + 4]):
+                                            value = pd.to_numeric(summary.get(key), errors='coerce')
+                                            if key == 'MIN':
+                                                gp = pd.to_numeric(summary.get('GP'), errors='coerce')
+                                                value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
+                                            elif key == 'USG%' and pd.notna(value):
+                                                value *= 100
+                                            if pd.isna(value):
+                                                shown = '—'
+                                            elif key == 'USG%':
+                                                shown = f'{value:.1f}%'
+                                            elif key in ('Fppg', 'xFppg'):
+                                                shown = f'{value:,.1f}'
+                                            elif key in ('GP', 'Fpts', 'xFpts', rank_label):
+                                                shown = f'{value:,.0f}'
+                                            else:
+                                                shown = f'{value:,.1f}'
+                                            metric_col.metric(label, shown)
+
+                                st.markdown('**Season - Stats**')
+                                pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
+                                              [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
+                                                                ('FT%', 'xFT%'), ('PTS', 'xPTS'),
+                                                                ('REB', 'xREB'), ('AST', 'xAST'),
+                                                                ('STL', 'xSTL'), ('BLK', 'xBLK'),
+                                                                ('TOV', 'xTO')] for stat in pair]
+                                              if c in quick_pg]
+                                if pg_columns:
+                                    st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
+                                                 row_height=35, hide_index=True, use_container_width=True)
+            render_player_quick_view()
+
+
+render_main_stats_section()
 
 # Isolate fantasy filters from the expensive main table rerun. The source data
 # and full player pool are cached; only the small display is rebuilt on changes.
@@ -1434,39 +1452,54 @@ def fantasy_team_analysis():
         _percent_cols = [c for c in _show if '%' in c]
         for _c in _percent_cols:
             _display[_c] = pd.to_numeric(_display[_c], errors='coerce') * 100
-        _number_cols = [c for c in _show if c not in
-                        ('Rk', 'Headshot', 'Player', 'Team', 'Pos')]
-        _formats = {c: stat_format(c, _mode, c in _percent_cols) for c in _number_cols}
-        _formats['Rk'] = lambda value: '' if pd.isna(value) else str(int(value))
-        _styled = _display[_show].style.format(_formats, na_rep='')
-        if 'Player' in _show:
-            # Fantasy Team Viewer uses regular names, with injury colors only.
-            _styled = _styled.map(injury_name_style, subset=['Player'])
-        _fantasy_column_config = stat_header_config(
-            _show, selected=_rank_stat,
-            descending=_rank_stat not in ('TOV', 'xTO'),
-            overrides={**({'Headshot': st.column_config.ImageColumn('Headshot', width='small')}
-                          if 'Headshot' in _show else {}),
-                       'Player': st.column_config.TextColumn('Player', width=250)})
-        # Match the main statistics table: selecting the row's checkbox opens
-        # the corresponding player in Quick View, then clears the selection.
-        _viewer_selection = st.dataframe(
-            _styled, height=600, hide_index=True, use_container_width=True,
-            row_height=35, column_config=_fantasy_column_config,
-            key=f"fantasy_viewer_selection_v096_{st.session_state.get('fantasy_viewer_selection_epoch', 0)}",
-            on_select='rerun', selection_mode='single-row',
-        )
-        _selected_rows = _viewer_selection.selection.rows
-        if _selected_rows and 'Player ID' in _view.columns:
-            _row_number = _selected_rows[0]
-            if 0 <= _row_number < len(_view):
-                _player_id = _view.iloc[_row_number]['Player ID']
-                if pd.notna(_player_id):
-                    st.session_state['regression_quick_view_request'] = str(_player_id)
-                    st.session_state['fantasy_viewer_selection_epoch'] = (
-                        st.session_state.get('fantasy_viewer_selection_epoch', 0) + 1
-                    )
+        # Reuse the same virtualized HTML/JS renderer as the main statistics table.
+        # Preserve the viewer's existing _show headers, their order, ranks and
+        # percentage formatting; only Headshot moves inside the Player cell.
+        _compact = _display[[c for c in _show if c != 'Headshot']].copy()
+        _compact['Player ID'] = _view['Player ID'].to_numpy() if 'Player ID' in _view else None
+        _compact['Season'] = (_view['Season'].to_numpy() if 'Season' in _view
+                              else str(fantasy_year))
+        _compact['Team'] = (_view['Team'].fillna('').to_numpy() if 'Team' in _view
+                            else '')
+        _compact['Positions'] = (_view['Positions'].fillna('').to_numpy()
+                                 if 'Positions' in _view else '')
+        _compact['Injury'] = (_view['Injury'].fillna('').to_numpy()
+                              if 'Injury' in _view else '')
+        _compact['Fantasy'] = (_view['Fantasy Team'].fillna('').to_numpy()
+                               if 'Fantasy Team' in _view else '')
+        _compact['Headshot'] = (_view['Player ID'].map(player_headshot).to_numpy()
+                                if 'Player ID' in _view else '')
+        _compact['_name'] = _view['Player'].fillna('').astype(str).to_numpy()
+        # Every player is already in the selected fantasy team context;
+        # do not highlight the Player cell or display redundant fantasy badges.
+        _compact['_focus'] = False
+        _compact['Fantasy'] = ''
+        _viewer_html = render_nba_html(
+            _compact, selected_focus=focus_fantasy_team, freeze_player=False,
+            sort_stat=_rank_stat if _rank_stat in _compact else 'Rk',
+            theme_bg=st.get_option('theme.backgroundColor') or '#0e1117',
+            theme_fg=st.get_option('theme.textColor') or '#fafafa',
+            theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
+            stat_mode=_mode, logo_url=nba_team_logo, compact_player=True)
+        _viewer_click = _nba_compact_click(
+            html=_viewer_html, height=min(585, 34 + 41 * len(_compact)),
+            key='nba_fantasy_viewer_compact_click')
+        if isinstance(_viewer_click, dict) and _viewer_click.get('player_id'):
+            try:
+                _pid = str(int(_viewer_click['player_id']))
+                _token = (_pid, _viewer_click.get('nonce'))
+                if _token != st.session_state.get('_nba_fantasy_viewer_last_click'):
+                    st.session_state['_nba_fantasy_viewer_last_click'] = _token
+                    st.session_state['regression_quick_view_request'] = _pid
+                    _yr = int(_viewer_click.get('year') or 0)
+                    if _yr:
+                        st.session_state[f'quick_view_year_{_pid}'] = _yr
+                    # The existing Quick View is in the earlier main fragment.
+                    # A full rerun is needed for this cross-fragment selection only;
+                    # viewer filter changes stay inside this fragment.
                     st.rerun(scope='app')
+            except (TypeError, ValueError):
+                pass
 
 fantasy_team_analysis()
 
