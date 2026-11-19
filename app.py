@@ -892,6 +892,8 @@ def render_main_stats_section():
                 df.loc[_has_position, 'Positions'] = _positions_by_player.loc[_has_position]
             # Filters are applied after computing the rank, so a team/position
             # filter does not renumber the league-wide player rankings.
+            stat_mode = st.segmented_control('Stat display', ['Per Game', 'Totals'],
+                default='Per Game', key='stat_display_mode_v39') or 'Per Game'
             _search_col, _f1, _f2, _f3, _f4, _f5 = st.columns([1.5, 1, 1, 1, 1, 1])
             with _search_col:
                 search = st.text_input('Search player')
@@ -917,8 +919,6 @@ def render_main_stats_section():
             with _f5:
                 _sort_order = st.selectbox('Sort Order', ['Descending', 'Ascending'],
                     key='main_sort_order_v39')
-            stat_mode = st.segmented_control('Stat display', ['Per Game', 'Totals'],
-                default='Per Game', key='stat_display_mode_v39') or 'Per Game'
             # Always show headshots when a Player ID exists. No toggle.
             table_data = as_per_game(df) if stat_mode == 'Per Game' else df.copy()
             # Restrict the ranking pool to the seasons selected in the table.
@@ -1013,7 +1013,17 @@ def render_main_stats_section():
             visible.insert(0, 'Rk', table_data['Rk'].to_numpy())
             if 'Positions' in visible:
                 visible = visible.rename(columns={'Positions': 'Pos'})
-            _front = ['Rk', 'Headshot', 'Player', 'AGE', 'Season']
+            # NBA fantasy season year (e.g. 2026-27 -> 2027), before AGE.
+            if 'Season' in table_data:
+                _season_labels = table_data['Season'].fillna('').astype(str)
+                _season_year = _season_labels.str.extract(r'(\d{4})\s*[-/]\s*(\d{2,4})')
+                _start_year = pd.to_numeric(_season_year[0], errors='coerce')
+                _end_year = pd.to_numeric(_season_year[1], errors='coerce')
+                _yr = _end_year.where(_end_year >= 1000, (_start_year // 100) * 100 + _end_year)
+                _yr = _yr.where(_yr >= _start_year, _yr + 100)
+                _yr = _yr.fillna(pd.to_numeric(_season_labels.str.extract(r'(\d{4})')[0], errors='coerce'))
+                visible['YR'] = _yr.astype('Int64').to_numpy()
+            _front = ['Rk', 'Headshot', 'Player', 'YR', 'AGE', 'Season']
             visible = visible[[c for c in _front if c in visible] +
                               [c for c in visible if c not in _front and c not in ('Fantasy', 'Team', 'Pos')] +
                               (['Fantasy'] if 'Fantasy' in visible else [])]
@@ -1073,22 +1083,27 @@ def render_main_stats_section():
             div[data-testid="stElementContainer"]:has(.st-key-nba_main_compact_click) {
                 margin-bottom: -0.9rem !important;
             }
-            div[data-testid="stHorizontalBlock"]:has(.st-key-nba_compact_freeze) {
+            /* Pull the entire footer up toward the table without altering
+               the margins inside the table's scrolling viewport. */
+            .st-key-nba_table_footer {
+                margin-top: -0.65rem !important;
+            }
+            .st-key-nba_table_footer div[data-testid="stHorizontalBlock"] {
                 align-items: center;
-                margin-top: -0.5rem;
             }
             </style>''')
-            _freeze_left, _meta_right = st.columns([1.6, 5], vertical_alignment='center', gap='small')
-            with _freeze_left:
-                st.toggle('Freeze player column', key='nba_compact_freeze',
-                          help='Keep player names and headshots visible while scrolling horizontally.')
-            with _meta_right:
-                _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · '
-                            f'{database_label()}')
-                if not fantasy_frame.empty:
-                    _summary += (f' · ESPN {fantasy_matches:,} matched / '
-                                 f'{fantasy_unmatched:,} unmatched')
-                st.markdown(f'<div style="text-align:right;color:#8ba2c4;font-size:0.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_summary}</div>', unsafe_allow_html=True)
+            with st.container(key='nba_table_footer'):
+                _freeze_left, _meta_right = st.columns([1.6, 5], vertical_alignment='center', gap='small')
+                with _freeze_left:
+                    st.toggle('Freeze Headshot', key='nba_compact_freeze',
+                              help='Keep player names and headshots visible while scrolling horizontally.')
+                with _meta_right:
+                    _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · '
+                                f'{database_label()}')
+                    if not fantasy_frame.empty:
+                        _summary += (f' · ESPN {fantasy_matches:,} matched / '
+                                     f'{fantasy_unmatched:,} unmatched')
+                    st.markdown(f'<div style="text-align:right;color:#929ba6;font-size:0.875rem">{_summary}</div>', unsafe_allow_html=True)
             export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
             for c in percent_columns:
                 export_view[c] = export_view[c].map(

@@ -13,6 +13,8 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
         n = pd.to_numeric(value, errors='coerce')
         if pd.isna(n):
             return '—'
+        if column == 'YR':
+            return f'{n:.0f}'
         if column in ('Rk', 'AGE', 'GP', 'Fpts', 'xFpts'):
             return f'{n:,.0f}'
         if column in ('Fppg', 'xFppg'):
@@ -26,8 +28,8 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     visible = [c for c in display.columns if c not in
                ('Player ID', 'Season', 'Team', 'Positions', 'Injury',
                 'Fantasy', 'Headshot', '_focus', '_name')]
-    visible = ['Rk', 'Player'] + [c for c in visible if c not in ('Rk', 'Player')]
-    header = ''.join(f'<th{" class=sorted-stat" if c == sort_stat else ""}>{esc(c)} <small>↕</small></th>' for c in visible)
+    visible = ['Rk', 'Headshot', 'Player'] + [c for c in visible if c not in ('Rk', 'Player')]
+    header = ''.join('<th class=photo-head title="Player headshot"></th>' if c == 'Headshot' else f'<th{" class=sorted-stat" if c == sort_stat else ""}>{esc(c)} <small>↕</small></th>' for c in visible)
     trs = []
     for _, r in display.iterrows():
         name = str(r.get('_name', r['Player']))
@@ -43,11 +45,13 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
         fantasy_badge = f'<span class="fantasy-badge">{esc(fantasy)}</span>' if fantasy not in ('', 'FA', 'NAN', 'NONE') else ''
         focused = ' focused' if bool(r.get('_focus', False)) else ''
         detail = f'{logo_html}{esc(team)} · {esc(str(r.get("Positions", "") or ""))}'
-        person = (f'<div class="person">{img}<div class="identity"><span class="player-name">{esc(name)}{badge}{fantasy_badge}</span>'
+        person = (f'<div class="person"><div class="identity"><span class="player-name">{esc(name)}{badge}{fantasy_badge}</span>'
                   f'<span class="detail">{detail}</span></div></div>')
         cells = []
         for c in visible:
-            if c == 'Player':
+            if c == 'Headshot':
+                cells.append(f'<td class="photo-cell">{img}</td>')
+            elif c == 'Player':
                 cells.append(f'<td class="player{focused}" data-sort="{esc(name.casefold())}">{person}</td>')
             else:
                 v = r.get(c)
@@ -79,20 +83,17 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     hover_bg = _blend(theme_bg, theme_accent, .12)
     focus_bg = _blend(theme_bg, theme_accent, .19)
     focus_hover_bg = _blend(theme_bg, theme_accent, .29)
-    sticky_player_css = (''' 
-    th:first-child,td:first-child{position:sticky;left:0;z-index:4;min-width:35px}
-    th:nth-child(2),td:nth-child(2){position:sticky;left:35px;z-index:4}
-    th:first-child,th:nth-child(2){z-index:8}
-    ''' if freeze_player else '''
-    th:first-child,td:first-child{min-width:44px;width:44px;max-width:44px;overflow:hidden}
-    ''')
-    player_width_css = ('th:nth-child(2),td.player{min-width:190px;width:190px;max-width:190px}'
+    sticky_player_css = ('''
+    th.photo-head,td.photo-cell{position:sticky;left:0;z-index:4}
+    th.photo-head{z-index:8}
+    ''' if freeze_player else '')
+    player_width_css = ('th:nth-child(3),td.player{min-width:190px;width:190px;max-width:190px}'
                         if compact_player else '')
     doc=f"""<!doctype html><html><head><meta charset="utf-8"><style>
     :root{{--bg:{theme_bg};--fg:{theme_fg};--accent:{theme_accent}}}
     *{{box-sizing:border-box}}html{{color-scheme:dark}}
     body{{margin:0;color:var(--fg);background:transparent;font:14px var(--app-font,"Source Sans","Source Sans Pro",-apple-system,"Segoe UI",Roboto,sans-serif)}}
-    .viewport{{overflow:auto;max-height:575px;border:1px solid #34414d;border-radius:7px;
+    .viewport{{overflow:auto;max-height:575px;margin-top:0;margin-bottom:0;border:1px solid #34414d;border-radius:7px;
     overscroll-behavior:contain;
     scrollbar-color:#485563 #111923;scrollbar-width:thin;color-scheme:dark}}
     .viewport::-webkit-scrollbar{{width:11px;height:11px;background:#111923}}
@@ -104,21 +105,23 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     th{{position:sticky;top:0;z-index:6;background:var(--bg);padding:7px 5px;text-align:right;
     white-space:nowrap;cursor:pointer;border-bottom:1px solid #34414d;font-weight:600}}
     th small{{opacity:.55}}th:hover{{color:var(--accent)}}
-    td{{padding:1px 5px;text-align:right;white-space:nowrap;border-bottom:1px solid #27333d;background:var(--bg)}}
+    td{{padding:0 5px;text-align:right;white-space:nowrap;border-bottom:1px solid #27333d;background:var(--bg)}}
     tr:hover td{{background:{hover_bg}}}
     /* Color only the active sort header text; leave backgrounds and data cells untouched. */
     thead th.sorted-stat{{color:var(--accent)!important}}
+    th.photo-head,td.photo-cell{{min-width:62px;width:62px;max-width:62px;text-align:center;padding:0 4px}}
+    td.photo-cell{{cursor:pointer}}
     {sticky_player_css}
-    th:nth-child(2),td.player{{text-align:left;min-width:210px}}
+    th:nth-child(3),td.player{{text-align:left;min-width:210px}}
     {player_width_css}
     td.player .person{{cursor:pointer}}
     td.player .identity .player-name:hover{{color:var(--accent);text-decoration:underline}}
-    .person{{display:flex;align-items:center;gap:5px;height:39px}}
-    tbody tr.data-row{{height:41px}}
+    .person{{display:flex;align-items:center;gap:5px;height:38px}}
+    tbody tr.data-row{{height:39px}}
     tbody tr.virtual-spacer td{{height:0;padding:0;border:0;line-height:0;background:var(--bg)!important;pointer-events:none}}
     .portrait{{width:52px;height:38px;object-fit:contain}}
     .identity{{display:flex;flex-direction:column;gap:1px}}
-    .identity .player-name{{display:flex;align-items:center;gap:4px;font-size:14px;font-weight:400}}
+    .identity .player-name{{display:flex;align-items:center;gap:4px;font-size:14px;font-weight:700}}
     .detail{{display:flex;align-items:center;gap:3px;opacity:.75;font-size:12px}}
     .club-logo{{width:16px;height:16px;object-fit:contain}}
     .fantasy-badge{{font-size:9px;padding:1px 4px;border-radius:3px;color:var(--accent);border:1px solid var(--accent)}}
@@ -138,7 +141,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     const heads=[...document.querySelectorAll('th')];
     const body=document.querySelector('tbody');
     const allRows=[...body.rows];
-    const ROW_HEIGHT=41, OVERSCAN=16, WINDOW_STEP=12;
+    const ROW_HEIGHT=39, OVERSCAN=36, WINDOW_STEP=24;
     let orderedRows=allRows.slice(), last=-1, asc=true;
     let firstRendered=-1, lastRendered=-1, frame=0;
     // Preserve measured widths before removing offscreen cells. This prevents
@@ -165,10 +168,10 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
       // Keep the same DOM nodes until the viewport nears the window edge.
       // This avoids replacing dozens of table rows for every small wheel movement.
       if(!force && firstRendered>=0 &&
-         firstVisible>=firstRendered+OVERSCAN/2 &&
-         firstVisible+visible<=lastRendered-OVERSCAN/2)return;
+         firstVisible>=firstRendered+12 &&
+         firstVisible+visible<=lastRendered-12)return;
       const top=Math.max(0,Math.floor(Math.max(0,firstVisible-OVERSCAN)/WINDOW_STEP)*WINDOW_STEP);
-      const bottom=Math.min(count,top+visible+2*OVERSCAN+WINDOW_STEP);
+      const bottom=Math.min(count,top+visible+2*OVERSCAN+2*WINDOW_STEP);
       if(!force && top===firstRendered && bottom===lastRendered)return;
       firstRendered=top;lastRendered=bottom;
       const fragment=document.createDocumentFragment();
@@ -181,7 +184,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     viewport.addEventListener('scroll',schedulePaint,{{passive:true}});
     // Event delegation survives rows being moved into and out of the DOM.
     body.addEventListener('click',event=>{{
-      if(!event.target.closest('td.player .person'))return;
+      if(!event.target.closest('td.player .person,td.photo-cell'))return;
       const row=event.target.closest('tr[data-player-id]');
       if(!row)return;
       window.parent.postMessage({{type:'mlb-player-click',
@@ -193,6 +196,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
       heads.forEach((h,j)=>h.classList.toggle('sorted-stat',j===index));
     }}
     heads.forEach((h,i)=>h.addEventListener('click',()=>{{
+      if(h.classList.contains('photo-head'))return;
       highlightColumn(i);
       asc=last===i?!asc:i===0;last=i;
       orderedRows.sort((a,b)=>{{
@@ -202,7 +206,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
           x.localeCompare(y,undefined,{{numeric:true}});
         return v*(asc?1:-1);
       }});
-      heads.forEach((head,j)=>head.querySelector('small').textContent=j===i?(asc?'▲':'▼'):'↕');
+      heads.forEach((head,j)=>{{const indicator=head.querySelector('small');if(indicator)indicator.textContent=j===i?(asc?'▲':'▼'):'↕';}});
       viewport.scrollTop=0;
       paint(true);
     }}));
