@@ -481,9 +481,28 @@ def normalize(df, season):
             )
 
         if df.duplicated(KEYS).any():
+            duplicate_rows = df.loc[df.duplicated(KEYS, keep=False)]
+            name_column = next(
+                (col for col in ("Player", "PLAYER_NAME", "Player Name", "player_name", "PLAYER")
+                 if col in duplicate_rows.columns),
+                None,
+            )
+            affected = []
+            for (_, player_id), rows in duplicate_rows.groupby(KEYS, sort=False, dropna=False):
+                player_name = ""
+                if name_column is not None:
+                    names = rows[name_column].dropna().astype(str).str.strip()
+                    names = names.loc[names.ne("")]
+                    if not names.empty:
+                        player_name = names.iloc[0]
+                affected.append(
+                    f"{player_name} (Player ID {player_id})" if player_name
+                    else f"Player ID {player_id}"
+                )
             raise ValueError(
-                "Duplicate player-season rows detected; "
-                "not saving ambiguous data."
+                "Duplicate player-season rows detected for: "
+                + "; ".join(affected)
+                + "; not saving ambiguous data."
             )
 
     return df.reset_index(drop=True)
