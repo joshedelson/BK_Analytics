@@ -35,6 +35,52 @@ SCORING_OPTIONS.update({'OREB': 'Offensive Rebounds', 'DREB': 'Defensive Rebound
                         'DD2': 'Double-Doubles', 'TD3': 'Triple-Doubles'})
 # Persist custom presets in the existing SQLite / PostgreSQL database.
 # This is loaded once per Streamlit session, not on every widget interaction.
+
+def _svg_from_html(chart_html):
+    import re
+    match = re.search(r"<svg\b[^>]*>.*?</svg>", chart_html, re.I | re.S)
+    return match.group(0) if match else ""
+
+
+def render_quick_chart_switch(wheel_html, radar_html):
+    wheel_svg = _svg_from_html(wheel_html)
+    radar_svg = _svg_from_html(radar_html)
+    markup = """<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}body{position:relative}
+.chart-switch{position:absolute;top:4px;left:8px;z-index:2;display:flex;align-items:center;justify-content:flex-start;gap:7px;margin:0;font-size:12px;color:#cbd5e1}
+.chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:7px;color:#cbd5e1;padding:5px 11px;cursor:pointer;font:inherit}
+.chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
+.chart{max-width:540px;margin:auto}
+.chart svg{width:100%;height:auto;display:block}
+.chart[hidden]{display:none!important}
+</style></head><body>
+<div class="chart-switch" role="group" aria-label="Percentile chart style">
+  <button id="wheel-btn" type="button" aria-pressed="true">Wheel</button>
+  <button id="radar-btn" type="button" aria-pressed="false">Radar</button>
+</div>
+<div id="wheel-chart" class="chart">__WHEEL__</div>
+<div id="radar-chart" class="chart" hidden>__RADAR__</div>
+<script>
+const wheel=document.getElementById('wheel-chart');
+const radar=document.getElementById('radar-chart');
+const wb=document.getElementById('wheel-btn');
+const rb=document.getElementById('radar-btn');
+function show(mode){
+  const isWheel=mode==='wheel';
+  wheel.hidden=!isWheel;radar.hidden=isWheel;
+  wb.setAttribute('aria-pressed',String(isWheel));
+  rb.setAttribute('aria-pressed',String(!isWheel));
+}
+wb.addEventListener('click',()=>show('wheel'));
+rb.addEventListener('click',()=>show('radar'));
+</script></body></html>"""
+    markup = markup.replace("__WHEEL__", wheel_svg).replace("__RADAR__", radar_svg)
+    import streamlit.components.v1 as components
+    components.html(markup, height=475, scrolling=False)
+
+
 def load_scoring_presets():
     presets = {'My ESPN League': dict(SCORING)}
     try:
@@ -296,6 +342,68 @@ def cached_quick_view_pool(seasons, revision):
     if 'Season' in pool:
         pool['_quick_year'] = season_end_year(pool['Season'])
     return pool
+
+
+
+@st.cache_data(ttl=600, max_entries=5, show_spinner=False)
+def cached_quick_season_percentiles(seasons, year, revision):
+    """Calculate every player's actual/expected percentile once per season.
+
+    Both actual and expected values are compared against the same qualified
+    ACTUAL-stat distribution. Turnovers are inverted (lower is better).
+    Returning maps keyed by Player ID makes switching players an O(1) lookup.
+    """
+    import math
+    import numpy as np
+    from nba_percentile_wheel import STATS, EXPECTED_KEYS
+    if year is None:
+        return {}, {}
+    pool = cached_quick_view_pool(seasons, revision)
+    if not {'_quick_year', '_quick_id', 'GP'}.issubset(pool.columns):
+        return {}, {}
+    peers = pool.loc[pool['_quick_year'].eq(int(year))].drop_duplicates('_quick_id')
+    if peers.empty:
+        return {}, {}
+    ids = peers['_quick_id'].astype(str).to_numpy()
+    gp = pd.to_numeric(peers['GP'], errors='coerce')
+    minutes = pd.to_numeric(
+        peers['MIN'] if 'MIN' in peers else pd.Series(float('nan'), index=peers.index),
+        errors='coerce')
+    max_gp = gp.max()
+    if pd.isna(max_gp) or max_gp <= 0:
+        return {}, {}
+    minimum_games = max(1, math.ceil(0.20 * float(max_gp) - 1e-9))
+    qualified = (gp.ge(minimum_games) & minutes.div(gp.where(gp.gt(0))).ge(15)).to_numpy()
+    actual_result = {pid: {} for pid in ids}
+    expected_result = {pid: {} for pid in ids}
+    # Fppg is intentionally absent from the nine-wedge STATS list,
+    # but its dedicated vertical bar still needs cached percentile values.
+    for actual_key, label, per_game in STATS + (('Fppg', 'Fppg', False),):
+        expected_key = EXPECTED_KEYS.get(actual_key)
+        if actual_key not in peers or expected_key not in peers:
+            continue
+        actual = pd.to_numeric(peers[actual_key], errors='coerce')
+        expected = pd.to_numeric(peers[expected_key], errors='coerce')
+        if per_game:
+            valid_gp = gp.where(gp.gt(0))
+            actual = actual.div(valid_gp)
+            expected = expected.div(valid_gp)
+        sample = np.sort(actual.to_numpy(dtype=float)[qualified & actual.notna().to_numpy()])
+        if sample.size < 5:
+            continue
+        for values, output in ((actual, actual_result), (expected, expected_result)):
+            arr = values.to_numpy(dtype=float)
+            valid = np.isfinite(arr)
+            if not valid.any():
+                continue
+            left = np.searchsorted(sample, arr[valid], side='left')
+            right = np.searchsorted(sample, arr[valid], side='right')
+            pct = 100.0 * (left + 0.5 * (right - left)) / sample.size
+            if actual_key == 'TOV':
+                pct = 100.0 - pct
+            for pid, value in zip(ids[valid], pct):
+                output[pid][label] = round(float(np.clip(value, 0, 100)), 1)
+    return actual_result, expected_result
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -1143,7 +1251,7 @@ def render_main_stats_section():
                                             top_player_id = str(candidates.loc[candidates['Fpts'].idxmax(), 'Player ID'])
                                             default_option = next((opt for opt in options if opt[1] == top_player_id), options[0])
                                 st.session_state['quick_view_player'] = default_option
-                            _player_select_col, _year_select_col, _rank_select_col, _scope_select_col = st.columns([3, 1, 3, 1.4], vertical_alignment='bottom')
+                            _player_select_col, _year_select_col, _filter_spacer = st.columns([3, 1, 5.1], vertical_alignment='bottom')
                             with _player_select_col:
                                 choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
                                                       key='quick_view_player')
@@ -1168,23 +1276,14 @@ def render_main_stats_section():
                                 else:
                                     st.selectbox('Year', ['No saved seasons'], disabled=True)
                                     selected_year = None
-                            with _rank_select_col:
-                                rank_stat = st.segmented_control(
-                                    'Rank by', ('Fppg', 'Fpts', 'xFppg', 'xFpts'),
-                                    default='Fppg', key='quick_view_rank_stat',
-                                ) or 'Fppg'
-                            with _scope_select_col:
-                                rank_scope = st.segmented_control(
-                                    'Rank scope', ('All', 'Pos'), default='All',
-                                    key='quick_view_rank_scope',
-                                    help='All ranks against every player; Pos ranks against players with the same primary ESPN position.',
-                                ) or 'All'
                             # Keep every saved season for the historical stats table; only
                             # the overview and identity card follow the Year dropdown.
                             overview_rows = (player_rows.loc[
                                 season_end_year(player_rows['Season']).eq(selected_year)
                             ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
-                            photo, details = st.columns([1.45, 3.55], gap="medium")
+                            photo, _wheel_area, _fppg_area, _overview_metrics, _right_margin = st.columns(
+                                [1.55, 2.58, 0.72, 1.35, 0.18], gap="small", vertical_alignment="top"
+                            )
                             with photo:
                                 url = player_headshot(choice[1])
                                 if url:
@@ -1274,91 +1373,183 @@ def render_main_stats_section():
                                 )
                                 st.markdown(_identity_html, unsafe_allow_html=True)
 
-                            with details:
-                                # Compact season summary instead of the former overview table.
-                                # The selected season is the first row, followed by saved history.
-                                per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
-                                                 'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
-                                rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
-                                quick_pg = player_rows.copy()
-                                games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
-                                         if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
-                                for col in per_game_cols + ['MIN']:
-                                    if col in quick_pg:
-                                        quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
+                        # Compact season summary instead of the former overview table.
+                        # The selected season is the first row, followed by saved history.
+                        per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
+                                         'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
+                        rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
+                        quick_pg = player_rows.copy()
+                        games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
+                                 if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
+                        for col in per_game_cols + ['MIN']:
+                            if col in quick_pg:
+                                quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
 
-                                def quick_display(frame, columns):
-                                    view = frame[columns].copy()
-                                    for col in columns:
-                                        if col in rate_cols or col == 'USG%':
-                                            view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                                lambda v: '' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
-                                        elif col not in ('Season', 'Team', 'Positions'):
-                                            view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                                lambda v: '' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
-                                    return view
+                        def quick_display(frame, columns):
+                            view = frame[columns].copy()
+                            for col in columns:
+                                if col in rate_cols or col == 'USG%':
+                                    view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                        lambda v: '' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
+                                elif col not in ('Season', 'Team', 'Positions'):
+                                    view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                        lambda v: '' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
+                            return view
 
-                                if not overview_rows.empty:
-                                    summary = overview_rows.iloc[0]
-                                    season = str(summary.get('Season', '')).strip()
-                                    # Compare with every saved player in the selected year;
-                                    # rankings are cached per year and statistic.
-                                    _position_pairs = cached_quick_position_pairs(fantasy_frame)
-                                    _rank_maps = cached_quick_all_ranks(quick_seasons, selected_year, _position_pairs, dataset_revision())
-                                    season_ranks = _rank_maps.get(rank_stat, {}).get(rank_scope, {})
-                                    rank_label = f'{rank_stat} Rank'
-                                    summary = summary.copy()
-                                    summary[rank_label] = season_ranks.get(choice[1], float('nan'))
-                                    summary_stats = [('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'), (rank_label, rank_label),
-                                                     ('Fpts', 'Fpts'), ('xFpts', 'xFpts'),
-                                                     ('Fppg', 'Fppg'), ('xFppg', 'xFppg')]
-                                    available_stats = [(key, label) for key, label in summary_stats if key in summary.index]
-                                    # Compact the eight overview metrics beside a percentile wheel.
-                                    from nba_percentile_wheel import render_percentile_wheel, player_percentiles
-                                    _wheel_area, _overview_metrics, _overview_right_pad = st.columns([1.9, 1.05, 0.28], gap='small', vertical_alignment="center")
-                                    with _overview_metrics:
-                                        if season and season.lower() not in ('nan', 'none'):
-                                            st.markdown(f'**{season} - Overview**')
-                                        _metric_html = []
-                                        from html import escape as _esc_metric
-                                        for key, label in available_stats:
-                                            value = pd.to_numeric(summary.get(key), errors='coerce')
-                                            if key == 'MIN':
-                                                gp = pd.to_numeric(summary.get('GP'), errors='coerce')
-                                                value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
-                                            elif key == 'USG%' and pd.notna(value):
-                                                value *= 100
-                                            if pd.isna(value):
-                                                shown = '—'
-                                            elif key == 'USG%':
-                                                shown = f'{value:.1f}%'
-                                            elif key in ('Fppg', 'xFppg'):
-                                                shown = f'{value:,.1f}'
-                                            elif key in ('GP', 'Fpts', 'xFpts', rank_label):
-                                                shown = f'{value:,.0f}'
-                                            else:
-                                                shown = f'{value:,.1f}'
-                                            _metric_html.append(
-                                                '<div style="padding:7px 9px;border:1px solid #303640;'
-                                                'border-radius:7px;background:#11151c;min-width:0">'
-                                                f'<div style="color:#a9b0bd;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
-                                                f'<div style="color:#f7f8fa;font-size:19px;font-weight:650;line-height:1.35">{_esc_metric(shown)}</div></div>'
-                                            )
-                                        st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px">'
-                                                    + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
-                                    with _wheel_area:
-                                        _wheel_percentiles = player_percentiles(
-                                            cached_quick_view_pool(quick_seasons, dataset_revision()),
-                                            selected_year, choice[1]
+                        if not overview_rows.empty:
+                            summary = overview_rows.iloc[0]
+                            season = str(summary.get('Season', '')).strip()
+                            # Rank controls and the Overview cards live in one small
+                            # fragment. Changing rank selection reruns only this
+                            # fragment, not the headshot, wheel, Fppg bar, or table.
+                            from nba_percentile_wheel import render_percentile_wheel, player_percentiles
+
+                            @st.fragment
+                            def _quick_rank_overview(_summary, _season, _player_id,
+                                                     _seasons, _year, _position_pairs,
+                                                     _revision):
+                                # Four compact rank buttons in a 2x2 grid.
+                                # Buttons rerun only this fragment, not the full app.
+                                st.session_state.setdefault('quick_view_rank_choice', 'Fppg')
+                                st.session_state.setdefault('quick_view_scope_choice', 'All')
+                                st.markdown('''<style>
+.st-key-quick_rank_compact [data-testid="stButton"] button {
+    min-height: 1.65rem !important; height: 1.65rem !important;
+    padding: 0 .3rem !important; font-size: .72rem !important;
+    border-radius: 5px !important;
+}
+.st-key-quick_rank_compact [data-testid="stVerticalBlock"] {
+    gap: .50rem !important;
+}
+.st-key-quick_rank_compact [data-testid="stHorizontalBlock"] {
+    gap: .4rem !important;
+}
+.st-key-quick_rank_compact .quick-rank-heading {
+    font-size: .94rem; font-weight: 700; line-height: 1.4;
+    display:block; padding: 0 0 8px; margin: 0;
+}
+</style>''', unsafe_allow_html=True)
+                                with st.container(key='quick_rank_compact'):
+                                    _rank_buttons_col, _rank_divider_col, _scope_buttons_col = st.columns([1.65, 0.09, 1], gap='small')
+                                    with _rank_divider_col:
+                                        st.markdown('<div style="border-left:1px solid #4a5261;height:67px;margin:12px auto 0;width:1px"></div>', unsafe_allow_html=True)
+                                    with _rank_buttons_col:
+                                        st.markdown('<div class="quick-rank-heading">Rank by</div>', unsafe_allow_html=True)
+                                        for _pair in (('Fppg', 'Fpts'), ('xFppg', 'xFpts')):
+                                            _left, _right = st.columns(2, gap='small')
+                                            for _col, _option in zip((_left, _right), _pair):
+                                                with _col:
+                                                    if st.button(
+                                                        _option,
+                                                        key=f'quick_rank_btn_{_option}',
+                                                        use_container_width=True,
+                                                        type=('primary' if st.session_state['quick_view_rank_choice'] == _option else 'secondary'),
+                                                    ):
+                                                        st.session_state['quick_view_rank_choice'] = _option
+                                                        st.rerun(scope='fragment')
+                                    with _scope_buttons_col:
+                                        st.markdown('<div class="quick-rank-heading">Rank scope</div>', unsafe_allow_html=True)
+                                        for _option in ('All', 'Pos'):
+                                            if st.button(
+                                                _option,
+                                                key=f'quick_scope_btn_{_option}',
+                                                use_container_width=True,
+                                                type=('primary' if st.session_state['quick_view_scope_choice'] == _option else 'secondary'),
+                                                help=('All players' if _option == 'All' else 'Same primary ESPN position'),
+                                            ):
+                                                st.session_state['quick_view_scope_choice'] = _option
+                                                st.rerun(scope='fragment')
+                                    _rank_stat = st.session_state['quick_view_rank_choice']
+                                    _rank_scope = st.session_state['quick_view_scope_choice']
+                                    _rank_maps = cached_quick_all_ranks(
+                                        _seasons, _year, _position_pairs, _revision
+                                    )
+                                    _rank_label = f'{_rank_stat} Rank'
+                                    _rank_value = _rank_maps.get(_rank_stat, {}).get(_rank_scope, {}).get(
+                                        _player_id, float('nan')
+                                    )
+                                    _summary_stats = [
+                                        ('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'),
+                                        (_rank_label, _rank_label), ('Fpts', 'Fpts'),
+                                        ('xFpts', 'xFpts'), ('Fppg', 'Fppg'), ('xFppg', 'xFppg'),
+                                    ]
+                                    _metric_html = []
+                                    from html import escape as _esc_metric
+                                    for key, label in _summary_stats:
+                                        if key != _rank_label and key not in _summary.index:
+                                            continue
+                                        value = (_rank_value if key == _rank_label else
+                                                 pd.to_numeric(_summary.get(key), errors='coerce'))
+                                        if key == 'MIN':
+                                            gp = pd.to_numeric(_summary.get('GP'), errors='coerce')
+                                            value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
+                                        elif key == 'USG%' and pd.notna(value):
+                                            value *= 100
+                                        if pd.isna(value):
+                                            shown = '—'
+                                        elif key == 'USG%':
+                                            shown = f'{value:.1f}%'
+                                        elif key in ('Fppg', 'xFppg'):
+                                            shown = f'{value:,.1f}'
+                                        elif key in ('GP', 'Fpts', 'xFpts', _rank_label):
+                                            shown = f'{value:,.0f}'
+                                        else:
+                                            shown = f'{value:,.1f}'
+                                        _metric_html.append(
+                                            '<div style="padding:12px 9px;border:1px solid #303640;'
+                                            'border-radius:7px;background:#11151c;min-width:0">'
+                                            f'<div style="color:#c2cbd8;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
+                                            f'<div style="color:#f7f8fa;font-size:21px;font-weight:700;line-height:1.25">{_esc_metric(shown)}</div></div>'
                                         )
-                                        _expected_wheel_percentiles = player_percentiles(
-                                            cached_quick_view_pool(quick_seasons, dataset_revision()),
-                                            selected_year, choice[1], expected=True
-                                        )
-                                        render_percentile_wheel(
-                                            _wheel_percentiles, summary,
-                                            expected_percentiles=_expected_wheel_percentiles
-                                        )
+                                    st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px">'
+                                                + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
+
+                            with _overview_metrics:
+                                if season and season.lower() not in ('nan', 'none'):
+                                    st.markdown(f'<div style="font-size:1rem;font-weight:800;line-height:1.5">{season} - Overview</div>', unsafe_allow_html=True)
+                                _quick_rank_overview(
+                                    summary, season, choice[1], quick_seasons, selected_year,
+                                    cached_quick_position_pairs(fantasy_frame), dataset_revision()
+                                )
+                            with _wheel_area:
+                                st.markdown('<div style="width:calc(100% + 150px);text-align:center;font-weight:700;font-size:1rem;line-height:1.5;margin:0 0 2px">Percentile Rankings</div>', unsafe_allow_html=True)
+                                from nba_percentile_radar import render_percentile_radar
+                                # Reuse precomputed season-wide distributions rather than
+                                # scanning/ranking every peer on each player selection.
+                                _actual_map, _expected_map = cached_quick_season_percentiles(
+                                    quick_seasons, selected_year, dataset_revision()
+                                )
+                                _wheel_percentiles = _actual_map.get(str(choice[1]), {})
+                                _expected_wheel_percentiles = _expected_map.get(str(choice[1]), {})
+                                # Both SVGs are built once from cached data. The
+                                # chart switch is client-side only: no Streamlit rerun,
+                                # API call, database query, or recalculation on toggle.
+                                _wheel_html = render_percentile_wheel(
+                                    _wheel_percentiles, summary,
+                                    expected_percentiles=_expected_wheel_percentiles,
+                                    return_html=True,
+                                )
+                                _radar_html = render_percentile_radar(
+                                    _wheel_percentiles, summary,
+                                    expected_percentiles=_expected_wheel_percentiles,
+                                    return_html=True,
+                                )
+                                render_quick_chart_switch(_wheel_html, _radar_html)
+                            with _fppg_area:
+                                st.markdown('<div style="height:26px"></div>', unsafe_allow_html=True)
+                                # Shift the bar visually left without changing column widths
+                                # or the Overview's horizontal position.
+                                st.markdown('''<style>
+.st-key-quick_fppg_shift iframe {
+    transform: translateX(-54px);
+    overflow: visible;
+}
+</style>''', unsafe_allow_html=True)
+                                with st.container(key='quick_fppg_shift'):
+                                    from nba_fppg_bar import render_fppg_bar
+                                    render_fppg_bar(
+                                        _wheel_percentiles, _expected_wheel_percentiles, summary
+                                    )
 
                             st.markdown('**Season - Stats**')
                             pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
@@ -1372,16 +1563,6 @@ def render_main_stats_section():
                                 st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
                                              row_height=35, hide_index=True, use_container_width=True)
 
-                            # Alternative visualization: preserve the original wheel above.
-                            if not overview_rows.empty:
-                                from nba_percentile_radar import render_percentile_radar
-                                st.markdown('**Percentile Radar — Actual vs Expected**')
-                                _radar_area, _radar_pad = st.columns([1.65, 1], gap='small')
-                                with _radar_area:
-                                    render_percentile_radar(
-                                        _wheel_percentiles, summary,
-                                        expected_percentiles=_expected_wheel_percentiles
-                                    )
             render_player_quick_view()
 
 

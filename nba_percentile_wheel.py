@@ -7,7 +7,7 @@ import streamlit.components.v1 as components
 STATS = (('PTS', 'PTS', True), ('AST', 'AST', True), ('REB', 'REB', True),
          ('STL', 'STL', True), ('BLK', 'BLK', True), ('TOV', 'TO', True),
          ('3PT%', '3PT%', False), ('FT%', 'FT%', False),
-         ('FG%', 'FG%', False), ('Fppg', 'Fppg', False))
+         ('FG%', 'FG%', False))
 
 EXPECTED_KEYS = {'PTS': 'xPTS', 'AST': 'xAST', 'REB': 'xREB', 'STL': 'xSTL',
                  'BLK': 'xBLK', 'TOV': 'xTO', '3PT%': 'x3P%', 'FT%': 'xFT%',
@@ -42,7 +42,7 @@ def player_percentiles(pool, year, player_id, expected=False):
     min_games = max(1, math.ceil(0.20 * float(games_elapsed) - 1e-9))
     qualified = gp.ge(min_games) & mins.div(gp.where(gp.gt(0))).ge(15)
     result = {}
-    for actual_key, label, per_game in STATS:
+    for actual_key, label, per_game in STATS + (('Fppg', 'Fppg', False),):
         # Both actual and expected values MUST use the same ACTUAL-stat
         # peer distribution. Comparing x3P% to other players' x3P%
         # would produce an incompatible percentile scale.
@@ -98,7 +98,7 @@ def _wedge(cx, cy, r0, r1, start, end):
             f'L {d[0]:.2f} {d[1]:.2f} A {r0:.2f} {r0:.2f} 0 0 0 {a[0]:.2f} {a[1]:.2f} Z')
 
 
-def render_percentile_wheel(percentiles, player_row=None, expected_percentiles=None):
+def render_percentile_wheel(percentiles, player_row=None, expected_percentiles=None, return_html=False):
     """Render actual wedges and optional same-color translucent expected wedges."""
     labels = [label for _,label,_ in STATS]
     values = {}
@@ -182,6 +182,9 @@ def render_percentile_wheel(percentiles, player_row=None, expected_percentiles=N
         # rather than centered vertically across it.
         if 140 <= angle <= 220:
             y += 17
+        elif angle >= 320 or angle <= 40:
+            # Lift the three-line top labels above the outer circle.
+            y -= 13
         parts.append(f'<text x="{x:.1f}" y="{y-13:.1f}" text-anchor="{anchor}" fill="#e8ebf1" font-size="13" font-weight="700">{escape(label)}</text>')
         if label in values:
             parts.append(f'<text x="{x:.1f}" y="{y+2:.1f}" text-anchor="{anchor}" fill="#fff" font-size="12" font-weight="700">{escape(values[label])}</text>')
@@ -194,4 +197,6 @@ def render_percentile_wheel(percentiles, player_row=None, expected_percentiles=N
     svg{width:100%;height:auto;display:block}</style></head><body><div class="wrap">
     <svg viewBox="0 0 500 450" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NBA player percentile wheel">"""
     + ''.join(parts) + '</svg></div></body></html>')
+    if return_html:
+        return html
     components.html(html, height=465, scrolling=False)
