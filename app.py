@@ -1095,7 +1095,7 @@ def render_main_stats_section():
             with st.container(key='nba_table_footer'):
                 _freeze_left, _meta_right = st.columns([1.6, 5], vertical_alignment='center', gap='small')
                 with _freeze_left:
-                    st.toggle('Freeze Headshot', key='nba_compact_freeze',
+                    st.toggle('Freeze player column', key='nba_compact_freeze',
                               help='Keep player names and headshots visible while scrolling horizontally.')
                 with _meta_right:
                     _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · '
@@ -1170,11 +1170,11 @@ def render_main_stats_section():
                             overview_rows = (player_rows.loc[
                                 season_end_year(player_rows['Season']).eq(selected_year)
                             ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
-                            photo, details = st.columns([1, 4])
+                            photo, details = st.columns([1.45, 3.55], gap="medium")
                             with photo:
                                 url = player_headshot(choice[1])
                                 if url:
-                                    st.image(url, width=190)
+                                    st.image(url, width=280)
                                 else:
                                     st.caption('No headshot ID available')
 
@@ -1232,6 +1232,15 @@ def render_main_stats_section():
                                 _injury_text = _html_escape(
                                     f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
                                 )
+                                # Status-specific injury note color: serious/unavailable red,
+                                # day-to-day/questionable yellow, healthy/unknown white.
+                                _injury_upper = _injury.upper().replace('-', '').replace(' ', '')
+                                if _injury_upper in ('O', 'OUT', 'IR', 'IL', 'SUSP', 'SUSPENDED', 'INJUREDRESERVE'):
+                                    _injury_color = '#ff6575'
+                                elif _injury_upper in ('DTD', 'DAYTODAY', 'Q', 'QUESTIONABLE', 'DOUBTFUL', 'PROBABLE', 'P'):
+                                    _injury_color = '#f1c75b'
+                                else:
+                                    _injury_color = '#f2f4f7'
                                 _return_text = _html_escape(_return_date or '—')
                                 _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
                                                 if _latest_update else '')
@@ -1244,40 +1253,13 @@ def render_main_stats_section():
                                     f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
                                     f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
                                     f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
-                                    f'<div style="margin-top:10px;"><u>Injury:</u> {_injury_text}</div>'
+                                    f'<div style="margin-top:10px;color:{_injury_color};"><u>Injury:</u> {_injury_text}</div>'
                                     f'<div><u>Expected return:</u> {_return_text}</div>'
                                     f'{_update_html}'
                                     '</div>'
                                 )
                                 st.markdown(_identity_html, unsafe_allow_html=True)
 
-                                with st.expander('Latest ESPN News', expanded=False):
-                                    if _espn_id and _espn_id.isdigit():
-                                        try:
-                                            _articles = cached_player_news(_espn_id)
-                                            if _articles:
-                                                # Scroll only the news, keeping it inside Player Quick View.
-                                                # Height shows approximately one story at a time.
-                                                with st.container(height=240, border=True):
-                                                    for _index, _item in enumerate(_articles):
-                                                        if _index:
-                                                            st.divider()
-                                                        st.markdown(f"**{_item['title']}**")
-                                                        if _item.get('date'):
-                                                            st.caption(f"{_item.get('source', 'ESPN')} · {_item['date']} UTC")
-                                                        if _item.get('summary'):
-                                                            st.caption(_item['summary'])
-                                                        if _item.get('url'):
-                                                            st.link_button('Read on ESPN', _item['url'])
-                                            else:
-                                                st.caption('No news returned by the ESPN Fantasy news endpoint.')
-                                        except Exception as _news_error:
-                                            st.caption(f'ESPN Fantasy news unavailable: {type(_news_error).__name__}.')
-                                        _fallback = player_news_fallback_url(_espn_id)
-                                        if _fallback:
-                                            st.link_button('Open ESPN player page / news', _fallback)
-                                    else:
-                                        st.caption('Refresh ESPN data to enable player news.')
                             with details:
                                 # Compact season summary instead of the former overview table.
                                 # The selected season is the first row, followed by saved history.
@@ -1305,8 +1287,6 @@ def render_main_stats_section():
                                 if not overview_rows.empty:
                                     summary = overview_rows.iloc[0]
                                     season = str(summary.get('Season', '')).strip()
-                                    if season and season.lower() not in ('nan', 'none'):
-                                        st.markdown(f'**{season} - Overview**')
                                     # Compare with every saved player in the selected year;
                                     # rankings are cached per year and statistic.
                                     _position_pairs = cached_quick_position_pairs(fantasy_frame)
@@ -1319,9 +1299,15 @@ def render_main_stats_section():
                                                      ('Fpts', 'Fpts'), ('xFpts', 'xFpts'),
                                                      ('Fppg', 'Fppg'), ('xFppg', 'xFppg')]
                                     available_stats = [(key, label) for key, label in summary_stats if key in summary.index]
-                                    for offset in range(0, len(available_stats), 4):
-                                        metric_cols = st.columns(4)
-                                        for metric_col, (key, label) in zip(metric_cols, available_stats[offset:offset + 4]):
+                                    # Compact the eight overview metrics beside a percentile wheel.
+                                    from nba_percentile_wheel import render_percentile_wheel, player_percentiles
+                                    _wheel_area, _overview_metrics, _overview_right_pad = st.columns([1.9, 1.05, 0.28], gap='small', vertical_alignment="center")
+                                    with _overview_metrics:
+                                        if season and season.lower() not in ('nan', 'none'):
+                                            st.markdown(f'**{season} - Overview**')
+                                        _metric_html = []
+                                        from html import escape as _esc_metric
+                                        for key, label in available_stats:
                                             value = pd.to_numeric(summary.get(key), errors='coerce')
                                             if key == 'MIN':
                                                 gp = pd.to_numeric(summary.get('GP'), errors='coerce')
@@ -1338,19 +1324,50 @@ def render_main_stats_section():
                                                 shown = f'{value:,.0f}'
                                             else:
                                                 shown = f'{value:,.1f}'
-                                            metric_col.metric(label, shown)
+                                            _metric_html.append(
+                                                '<div style="padding:7px 9px;border:1px solid #303640;'
+                                                'border-radius:7px;background:#11151c;min-width:0">'
+                                                f'<div style="color:#a9b0bd;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
+                                                f'<div style="color:#f7f8fa;font-size:19px;font-weight:650;line-height:1.35">{_esc_metric(shown)}</div></div>'
+                                            )
+                                        st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px">'
+                                                    + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
+                                    with _wheel_area:
+                                        _wheel_percentiles = player_percentiles(
+                                            cached_quick_view_pool(quick_seasons, dataset_revision()),
+                                            selected_year, choice[1]
+                                        )
+                                        _expected_wheel_percentiles = player_percentiles(
+                                            cached_quick_view_pool(quick_seasons, dataset_revision()),
+                                            selected_year, choice[1], expected=True
+                                        )
+                                        render_percentile_wheel(
+                                            _wheel_percentiles, summary,
+                                            expected_percentiles=_expected_wheel_percentiles
+                                        )
 
-                                st.markdown('**Season - Stats**')
-                                pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
-                                              [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
-                                                                ('FT%', 'xFT%'), ('PTS', 'xPTS'),
-                                                                ('REB', 'xREB'), ('AST', 'xAST'),
-                                                                ('STL', 'xSTL'), ('BLK', 'xBLK'),
-                                                                ('TOV', 'xTO')] for stat in pair]
-                                              if c in quick_pg]
-                                if pg_columns:
-                                    st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
-                                                 row_height=35, hide_index=True, use_container_width=True)
+                            st.markdown('**Season - Stats**')
+                            pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
+                                          [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
+                                                            ('FT%', 'xFT%'), ('PTS', 'xPTS'),
+                                                            ('REB', 'xREB'), ('AST', 'xAST'),
+                                                            ('STL', 'xSTL'), ('BLK', 'xBLK'),
+                                                            ('TOV', 'xTO')] for stat in pair]
+                                          if c in quick_pg]
+                            if pg_columns:
+                                st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
+                                             row_height=35, hide_index=True, use_container_width=True)
+
+                            # Alternative visualization: preserve the original wheel above.
+                            if not overview_rows.empty:
+                                from nba_percentile_radar import render_percentile_radar
+                                st.markdown('**Percentile Radar — Actual vs Expected**')
+                                _radar_area, _radar_pad = st.columns([1.65, 1], gap='small')
+                                with _radar_area:
+                                    render_percentile_radar(
+                                        _wheel_percentiles, summary,
+                                        expected_percentiles=_expected_wheel_percentiles
+                                    )
             render_player_quick_view()
 
 
