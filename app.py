@@ -1128,7 +1128,21 @@ def render_main_stats_section():
                             if current_index is not None:
                                 st.session_state['quick_view_player'] = options[current_index]
                             elif st.session_state.get('quick_view_player') not in options:
-                                st.session_state['quick_view_player'] = options[0]
+                                # On a fresh page load, default to the player with the
+                                # most total fantasy points in the latest loaded season.
+                                # Preserve manual choices and table-click navigation.
+                                default_option = options[0]
+                                if {'Season', 'Player ID', 'Fpts'}.issubset(df.columns):
+                                    season_years = pd.to_numeric(season_end_year(df['Season']), errors='coerce')
+                                    if season_years.notna().any():
+                                        latest_year = season_years.max()
+                                        candidates = df.loc[season_years.eq(latest_year), ['Player ID', 'Fpts']].copy()
+                                        candidates['Fpts'] = pd.to_numeric(candidates['Fpts'], errors='coerce')
+                                        candidates = candidates.dropna(subset=['Fpts'])
+                                        if not candidates.empty:
+                                            top_player_id = str(candidates.loc[candidates['Fpts'].idxmax(), 'Player ID'])
+                                            default_option = next((opt for opt in options if opt[1] == top_player_id), options[0])
+                                st.session_state['quick_view_player'] = default_option
                             _player_select_col, _year_select_col, _rank_select_col, _scope_select_col = st.columns([3, 1, 3, 1.4], vertical_alignment='bottom')
                             with _player_select_col:
                                 choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
