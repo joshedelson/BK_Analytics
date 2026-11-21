@@ -5,21 +5,23 @@ import pandas as pd
 
 def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
                     theme_bg, theme_fg, theme_accent, stat_mode, logo_url,
-                    compact_player=False):
+                    compact_player=False, show_rank=True, show_player_id=False):
     def esc(value):
         return html.escape(str(value), quote=True)
 
     def fmt(column, value):
         n = pd.to_numeric(value, errors='coerce')
         if pd.isna(n):
+            if column in ('Fantasy team', 'Confidence'):
+                return esc(value) if pd.notna(value) and str(value).strip() else '—'
             return '—'
-        if column == 'YR':
+        if column in ('YR', 'Yr', 'Year', 'Team ID', 'Team Id', 'TEAM_ID', 'Player ID'):
             return f'{n:.0f}'
-        if column in ('Rk', 'AGE', 'GP', 'Fpts', 'xFpts'):
+        if column in ('Rk', 'Proj. Rk', 'AGE', 'GP', 'Fpts', 'xFpts', 'Current Rank', 'Projected Rank'):
             return f'{n:,.0f}'
-        if column in ('Fppg', 'xFppg'):
+        if column in ('Fppg', 'xFppg', 'pFppg', 'hFppg', 'Projected Fppg', 'Historical Fppg'):
             return f'{n:,.2f}'
-        if '%' in column:
+        if '%' in column or column == 'ΔUSG':
             return f'{n:.1f}%'
         if stat_mode == 'Totals':
             return f'{n:,.0f}'
@@ -28,8 +30,45 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     visible = [c for c in display.columns if c not in
                ('Player ID', 'Season', 'Team', 'Positions', 'Injury',
                 'Fantasy', 'Headshot', '_focus', '_name')]
-    visible = ['Rk', 'Headshot', 'Player'] + [c for c in visible if c not in ('Rk', 'Player')]
-    header = ''.join('<th class=photo-head title="Player headshot"></th>' if c == 'Headshot' else f'<th{" class=sorted-stat" if c == sort_stat else ""}>{esc(c)} <small>↕</small></th>' for c in visible)
+    if show_player_id and 'Player ID' in display.columns:
+        # Player ID is normally hidden because it is used internally for click
+        # navigation. Display it only when explicitly requested by main table.
+        anchor = visible.index('Team ID') + 1 if 'Team ID' in visible else len(visible)
+        visible.insert(anchor, 'Player ID')
+    if show_rank:
+        visible = ['Rk', 'Player'] + [c for c in visible if c not in ('Rk', 'Player')]
+    else:
+        visible = ['Player'] + [c for c in visible if c != 'Player']
+    # Display-only abbreviations for NBA Hustle statistics. Preserve source
+    # column names for sorting, calculations, filters, and exports.
+    hustle_headers = {
+        'Contested Shots': 'Cont. Shots',
+        'Contested 2PT': 'Cont. 2PT',
+        'Contested 3PT': 'Cont. 3PT',
+        'Deflections': 'Defl.',
+        'Charges Drawn': 'Chg. Drawn',
+        'Contested OREB': 'Cont. OREB',
+        'Uncontested OREB': 'Uncont. OREB',
+        'OREB Chances': 'OREB Ch.',
+        'OREB Chances Deferred': 'OREB Ch. Def.',
+        'Contested DREB': 'Cont. DREB',
+        'Uncontested DREB': 'Uncont. DREB',
+        'DREB Chances': 'DREB Ch.',
+        'DREB Chances Deferred': 'DREB Ch. Def.',
+        'Contested REB': 'Cont. REB',
+        'Uncontested REB': 'Uncont. REB',
+        'REB Chances': 'REB Ch.',
+        'REB Chances Deferred': 'REB Ch. Def.',
+        'Passes Made': 'Pass Made',
+        'Passes Received': 'Pass Rec.',
+        'Potential AST': 'Pot. AST',
+        'Touches': 'Touches',
+    }
+    header = ''.join(
+        f'<th class="{("player-header " if c == "Player" else "") + ("sorted-stat" if c == sort_stat else "")}"'
+        f' title="{esc(c)}">{esc(hustle_headers.get(c, c))} <small>↕</small></th>'
+        for c in visible
+    )
     trs = []
     for _, r in display.iterrows():
         name = str(r.get('_name', r['Player']))
@@ -45,13 +84,16 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
         fantasy_badge = f'<span class="fantasy-badge">{esc(fantasy)}</span>' if fantasy not in ('', 'FA', 'NAN', 'NONE') else ''
         focused = ' focused' if bool(r.get('_focus', False)) else ''
         detail = f'{logo_html}{esc(team)} · {esc(str(r.get("Positions", "") or ""))}'
-        person = (f'<div class="person"><div class="identity"><span class="player-name">{esc(name)}{badge}{fantasy_badge}</span>'
+        if compact_player and not show_rank:
+            name_html = (f'<span class="player-name"><span class="player-text">{esc(name)}</span>'
+                         f'{badge}{fantasy_badge}</span>')
+        else:
+            name_html = f'<span class="player-name">{esc(name)}{badge}{fantasy_badge}</span>'
+        person = (f'<div class="person">{img}<div class="identity">{name_html}'
                   f'<span class="detail">{detail}</span></div></div>')
         cells = []
         for c in visible:
-            if c == 'Headshot':
-                cells.append(f'<td class="photo-cell">{img}</td>')
-            elif c == 'Player':
+            if c == 'Player':
                 cells.append(f'<td class="player{focused}" data-sort="{esc(name.casefold())}">{person}</td>')
             else:
                 v = r.get(c)
@@ -83,17 +125,66 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     hover_bg = _blend(theme_bg, theme_accent, .12)
     focus_bg = _blend(theme_bg, theme_accent, .19)
     focus_hover_bg = _blend(theme_bg, theme_accent, .29)
-    sticky_player_css = ('''
-    th.photo-head,td.photo-cell{position:sticky;left:0;z-index:4}
-    th.photo-head{z-index:8}
-    ''' if freeze_player else '')
-    player_width_css = ('th:nth-child(3),td.player{min-width:190px;width:190px;max-width:190px}'
-                        if compact_player else '')
+    sticky_player_css = (''' 
+    th:first-child,td:first-child{position:sticky;left:0;z-index:4;min-width:35px}
+    th:nth-child(2),td:nth-child(2){position:sticky;left:35px;z-index:4}
+    th:first-child,th:nth-child(2){z-index:8}
+    ''' if freeze_player else '''
+    th:first-child,td:first-child{min-width:44px;width:44px;max-width:44px;overflow:hidden}
+    ''')
+    player_width_css = ('''
+    th:first-child,td.player{position:sticky;left:0;min-width:220px;
+        text-align:left;overflow:hidden}
+    td.player{z-index:5;background:var(--bg)}
+    thead th:first-child{z-index:10;text-align:left;background:var(--bg)}
+    tr:hover td.player{background:{hover_bg}}
+    td.player .person{width:100%;min-width:0;overflow:hidden}
+    td.player .portrait{flex:0 0 46px;width:46px;height:36px}
+    td.player .identity{flex:1 1 0;min-width:0;max-width:none;overflow:hidden}
+    td.player .player-name{display:flex;align-items:center;gap:3px;
+        min-width:0;max-width:100%;overflow:hidden;white-space:nowrap}
+    td.player .player-text{flex:0 1 auto;min-width:0;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+    td.player .detail{min-width:0;max-width:100%;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+    '''.replace('{hover_bg}', hover_bg) if compact_player and not show_rank else
+    'th:nth-child(2),td.player{min-width:190px;width:190px;max-width:190px}' if compact_player else '')
+    # Compact widths apply only to the regression grids, not the main table.
+    regression_widths = {
+        'Player': 220, 'Rk': 44, 'Proj. Rk': 66, 'GP': 40,
+        'Fppg': 63, 'xFppg': 66, 'hFppg': 66, 'pFppg': 66,
+        'MPG': 52, 'Proj. MPG': 78, 'USG%': 62, 'ΔUSG': 59,
+        'Confidence': 79, 'ROS Upside': 88, 'Sell-High Gap': 100,
+    }
+    regression_mode = compact_player and not show_rank
+    # Percentages let the regression grid fill its container while the
+    # minimum width keeps every heading and player identity readable.
+    regression_width_css = ''
+    explicit_colgroup = ''
+    regression_table_css = ''
+    if regression_mode:
+        total_width = sum(regression_widths.get(col, 70) for col in visible)
+        explicit_colgroup = '<colgroup>' + ''.join(
+            f'<col style="width:{regression_widths.get(col, 70) / total_width * 100:.5f}%">'
+            for col in visible
+        ) + '</colgroup>'
+        regression_width_css = '\n'.join(
+            f'th:nth-child({i}),td:nth-child({i})' +
+            '{min-width:' + str(regression_widths.get(col, 70)) + 'px}'
+            for i, col in enumerate(visible, 1)
+        )
+        regression_table_css = (
+            f'table{{table-layout:fixed!important;width:100%!important;'
+            f'min-width:{total_width}px!important}}'
+            'td.player,th:first-child{overflow:hidden!important}'
+            'td.player{max-width:none!important;width:auto!important}'
+            'th:first-child{max-width:none!important;width:auto!important}'
+        )
     doc=f"""<!doctype html><html><head><meta charset="utf-8"><style>
     :root{{--bg:{theme_bg};--fg:{theme_fg};--accent:{theme_accent}}}
     *{{box-sizing:border-box}}html{{color-scheme:dark}}
     body{{margin:0;color:var(--fg);background:transparent;font:14px var(--app-font,"Source Sans","Source Sans Pro",-apple-system,"Segoe UI",Roboto,sans-serif)}}
-    .viewport{{overflow:auto;max-height:575px;margin-top:0;margin-bottom:0;border:1px solid #34414d;border-radius:7px;
+    .viewport{{overflow:auto;max-height:575px;border:1px solid #34414d;border-radius:7px;
     overscroll-behavior:contain;
     scrollbar-color:#485563 #111923;scrollbar-width:thin;color-scheme:dark}}
     .viewport::-webkit-scrollbar{{width:11px;height:11px;background:#111923}}
@@ -105,33 +196,34 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     th{{position:sticky;top:0;z-index:6;background:var(--bg);padding:7px 5px;text-align:right;
     white-space:nowrap;cursor:pointer;border-bottom:1px solid #34414d;font-weight:600}}
     th small{{opacity:.55}}th:hover{{color:var(--accent)}}
-    td{{padding:0 5px;text-align:right;white-space:nowrap;border-bottom:1px solid #27333d;background:var(--bg)}}
+    th.player-header{{text-align:left!important}}
+    td{{padding:1px 5px;text-align:right;white-space:nowrap;border-bottom:1px solid #27333d;background:var(--bg)}}
     tr:hover td{{background:{hover_bg}}}
     /* Color only the active sort header text; leave backgrounds and data cells untouched. */
     thead th.sorted-stat{{color:var(--accent)!important}}
-    th.photo-head,td.photo-cell{{min-width:62px;width:62px;max-width:62px;text-align:center;padding:0 4px}}
-    td.photo-cell{{cursor:pointer}}
-    {sticky_player_css}
-    th:nth-child(3),td.player{{text-align:left;min-width:210px}}
+    {sticky_player_css if show_rank else ''}
+    td.player{{text-align:left;min-width:210px}}
     {player_width_css}
+    {regression_width_css}
+    {regression_table_css}
     td.player .person{{cursor:pointer}}
     td.player .identity .player-name:hover{{color:var(--accent);text-decoration:underline}}
-    .person{{display:flex;align-items:center;gap:5px;height:38px}}
-    tbody tr.data-row{{height:39px}}
+    .person{{display:flex;align-items:center;gap:5px;height:39px}}
+    tbody tr.data-row{{height:41px}}
     tbody tr.virtual-spacer td{{height:0;padding:0;border:0;line-height:0;background:var(--bg)!important;pointer-events:none}}
     .portrait{{width:52px;height:38px;object-fit:contain}}
     .identity{{display:flex;flex-direction:column;gap:1px}}
-    .identity .player-name{{display:flex;align-items:center;gap:4px;font-size:14px;font-weight:700}}
+    .identity .player-name{{display:flex;align-items:center;gap:4px;font-size:14px;font-weight:400}}
     .detail{{display:flex;align-items:center;gap:3px;opacity:.75;font-size:12px}}
     .club-logo{{width:16px;height:16px;object-fit:contain}}
-    .fantasy-badge{{font-size:9px;padding:1px 4px;border-radius:3px;color:var(--accent);border:1px solid var(--accent)}}
+    .fantasy-badge{{flex:0 0 auto;font-size:9px;padding:1px 4px;border-radius:3px;color:var(--accent);border:1px solid var(--accent)}}
     .injury{{display:inline-block;margin-left:4px;padding:1px 3px;border-radius:3px;font-size:10px;font-weight:800;line-height:1.2;vertical-align:1px}}
     .injury-o,.injury-ir{{color:#ff5964;background:rgba(255,89,100,.13)}}
     .injury-dtd{{color:#f4c453;background:rgba(244,196,83,.13)}}
     td.player.focused{{border-left:4px solid var(--accent);padding-left:1px;
       background:{focus_bg}}}
     tr:hover td.player.focused{{background:{focus_hover_bg}}}
-    </style></head><body><div class="viewport"><table><thead><tr>{header}</tr></thead>
+    </style></head><body><div class="viewport"><table>{explicit_colgroup}<thead><tr>{header}</tr></thead>
     <tbody>{''.join(trs)}</tbody></table></div><script>
     // Virtualize rows inside the existing scrolling viewport. Sorting remains
     // client-side and works across the COMPLETE dataset, not just visible rows.
@@ -141,19 +233,21 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     const heads=[...document.querySelectorAll('th')];
     const body=document.querySelector('tbody');
     const allRows=[...body.rows];
-    const ROW_HEIGHT=39, OVERSCAN=36, WINDOW_STEP=24;
+    const ROW_HEIGHT=41, OVERSCAN=16, WINDOW_STEP=12;
     let orderedRows=allRows.slice(), last=-1, asc=true;
     let firstRendered=-1, lastRendered=-1, frame=0;
     // Preserve measured widths before removing offscreen cells. This prevents
     // the table from changing width as different players come into view.
     const measured=heads.map(h=>Math.ceil(h.getBoundingClientRect().width));
     const measuredTable=Math.ceil(table.getBoundingClientRect().width);
-    const colgroup=document.createElement('colgroup');
-    measured.forEach(w=>{{const col=document.createElement('col');col.style.width=w+'px';colgroup.appendChild(col);}});
-    table.insertBefore(colgroup,table.firstChild);
+    if(!table.querySelector('colgroup')){{
+      const colgroup=document.createElement('colgroup');
+      measured.forEach(w=>{{const col=document.createElement('col');col.style.width=w+'px';colgroup.appendChild(col);}});
+      table.insertBefore(colgroup,table.firstChild);
+      table.style.width=measuredTable+'px';
+      table.style.minWidth='100%';
+    }}
     table.style.tableLayout='fixed';
-    table.style.width=measuredTable+'px';
-    table.style.minWidth='100%';
     allRows.forEach(r=>r.classList.add('data-row'));
     const spacer=(height)=>{{
       const tr=document.createElement('tr');tr.className='virtual-spacer';
@@ -168,10 +262,10 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
       // Keep the same DOM nodes until the viewport nears the window edge.
       // This avoids replacing dozens of table rows for every small wheel movement.
       if(!force && firstRendered>=0 &&
-         firstVisible>=firstRendered+12 &&
-         firstVisible+visible<=lastRendered-12)return;
+         firstVisible>=firstRendered+OVERSCAN/2 &&
+         firstVisible+visible<=lastRendered-OVERSCAN/2)return;
       const top=Math.max(0,Math.floor(Math.max(0,firstVisible-OVERSCAN)/WINDOW_STEP)*WINDOW_STEP);
-      const bottom=Math.min(count,top+visible+2*OVERSCAN+2*WINDOW_STEP);
+      const bottom=Math.min(count,top+visible+2*OVERSCAN+WINDOW_STEP);
       if(!force && top===firstRendered && bottom===lastRendered)return;
       firstRendered=top;lastRendered=bottom;
       const fragment=document.createDocumentFragment();
@@ -184,7 +278,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
     viewport.addEventListener('scroll',schedulePaint,{{passive:true}});
     // Event delegation survives rows being moved into and out of the DOM.
     body.addEventListener('click',event=>{{
-      if(!event.target.closest('td.player .person,td.photo-cell'))return;
+      if(!event.target.closest('td.player .person'))return;
       const row=event.target.closest('tr[data-player-id]');
       if(!row)return;
       window.parent.postMessage({{type:'mlb-player-click',
@@ -196,7 +290,6 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
       heads.forEach((h,j)=>h.classList.toggle('sorted-stat',j===index));
     }}
     heads.forEach((h,i)=>h.addEventListener('click',()=>{{
-      if(h.classList.contains('photo-head'))return;
       highlightColumn(i);
       asc=last===i?!asc:i===0;last=i;
       orderedRows.sort((a,b)=>{{
@@ -206,7 +299,7 @@ def render_nba_html(display, *, selected_focus, freeze_player, sort_stat,
           x.localeCompare(y,undefined,{{numeric:true}});
         return v*(asc?1:-1);
       }});
-      heads.forEach((head,j)=>{{const indicator=head.querySelector('small');if(indicator)indicator.textContent=j===i?(asc?'▲':'▼'):'↕';}});
+      heads.forEach((head,j)=>head.querySelector('small').textContent=j===i?(asc?'▲':'▼'):'↕');
       viewport.scrollTop=0;
       paint(true);
     }}));

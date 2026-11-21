@@ -1,4 +1,4 @@
-"""Dynasty trade matching with elite scarcity and roster-spot replacement cost.
+"""Dynasty trade matching with production safeguards and realistic asking prices.
 
 All valuations are heuristics, not inferred manager preferences. Uses only existing
 ESPN rosters and expected-first fantasy projections; optional daily crowd-ranking refresh.
@@ -87,16 +87,24 @@ def _crowd_reputation(row):
 
 
 def _dynasty_multiplier(age):
+    """Smooth dynasty horizon adjustment (assumption, not a career forecast).
+
+    Young players receive a premium for remaining productive seasons; players
+    in their 30s receive a gradually increasing age discount. The premium is
+    deliberately bounded so age alone cannot outweigh a large Fppg gap.
+    """
+    age = pd.to_numeric(age, errors='coerce')
     if pd.isna(age):
         return 1.0
     age = float(age)
-    # Small, transparent age premium; these are adjustable assumptions.
-    if age <= 22: return 1.12
-    if age <= 25: return 1.09
-    if age <= 28: return 1.04
-    if age <= 31: return 1.00
-    if age <= 34: return .93
-    return .87
+    anchors = ((19., 1.22), (22., 1.19), (25., 1.13), (28., 1.06),
+               (30., 1.00), (32., .93), (34., .85), (36., .76), (39., .65))
+    if age <= anchors[0][0]:
+        return anchors[0][1]
+    for (a0, v0), (a1, v1) in zip(anchors, anchors[1:]):
+        if age <= a1:
+            return v0 + (v1 - v0) * (age - a0) / (a1 - a0)
+    return anchors[-1][1]
 
 
 def _star_multiplier(row):
@@ -124,8 +132,61 @@ def _seller_value(row, league_teams=None):
     return value
 
 
+def _production(row):
+    """Current-season projection; no age adjustment or dynasty speculation."""
+    value = pd.to_numeric(row.get('Projected Fppg'), errors='coerce')
+    return max(0.0, float(value)) if pd.notna(value) else 0.0
+
+
+def _evidence_upside(row):
+    """Conservative potential estimate; age by itself never creates upside.
+
+    Expected Fppg is already reflected in projected Fppg. Only a fraction of
+    any remaining positive expected-vs-projected gap is credited, capped at 12%.
+    Missing expected data earns no upside premium.
+    """
+    projected = _production(row)
+    expected = pd.to_numeric(row.get('xFppg'), errors='coerce')
+    if pd.isna(expected) or projected <= 0:
+        return projected
+    gp = pd.to_numeric(row.get('GP'), errors='coerce')
+    reliability = min(1.0, max(0.0, float(gp)) / 25.0) if pd.notna(gp) else 0.0
+    bonus = min(projected * .12, max(0.0, float(expected) - projected) * .25 * reliability)
+    return projected + bonus
+
+
 def _player_value(row):
-    return float(row['Projected Fppg']) * _dynasty_multiplier(row.get('AGE')) * _star_multiplier(row)
+    """65% projected production, 25% evidence-based upside, 10% longevity.
+
+    The scarcity factor rewards scarce stars, but age only affects the final
+    10% component. These are configurable heuristics, not calibrated weights.
+    """
+    projected = _production(row)
+    upside = _evidence_upside(row)
+    longevity = projected * _dynasty_multiplier(row.get('AGE'))
+    return (.65 * projected + .25 * upside + .10 * longevity) * _star_multiplier(row)
+
+
+def _market_value(row):
+    """Win-now asking-price baseline: 75% production, 25% dynasty value."""
+    return .75 * _production(row) * _star_multiplier(row) + .25 * _player_value(row)
+
+
+def _production_match(given, received, max_gap=.15):
+    """Reject lopsided projected Fppg exchanges, including 2-for-2 packages.
+
+    A 2-for-2 must satisfy both the total production floor and a top-player
+    floor so two lower-tier assets cannot replace a cornerstone cheaply.
+    """
+    out = sorted((_production(p) for p in given), reverse=True)
+    inc = sorted((_production(p) for p in received), reverse=True)
+    if len(out) != len(inc) or not out:
+        return False
+    if sum(inc) < sum(out) * (1.0 - max_gap):
+        return False
+    if len(out) == 2 and inc[0] < out[0] * (1.0 - max_gap):
+        return False
+    return True
 
 
 def _historical_rank_reputation(row):
@@ -152,7 +213,7 @@ def _historical_rank_reputation(row):
 
 def _perceived(row, league_teams=None):
     # Draft anchoring fades for players with more games; never replaces production.
-    actual = _player_value(row)
+    actual = _market_value(row)
     pick = pd.to_numeric(row.get('Draft Overall'), errors='coerce')
     draft_round = pd.to_numeric(row.get('Draft Round'), errors='coerce')
     if (pd.isna(pick) or pick <= 0) and pd.isna(draft_round):
@@ -236,7 +297,7 @@ def _normalize(projections, fantasy, historical_stats=None, current_season=None)
     df = projections.copy()
     df['Player ID'] = df['Player ID'].astype('string').str.replace(r'\.0$', '', regex=True)
     df['Fantasy Team'] = df['Fantasy Team'].fillna('FA').astype(str).str.strip()
-    for c in ('Fppg', 'Projected Fppg', 'AGE', 'GP', 'Draft Overall', 'Draft Round'):
+    for c in ('Fppg', 'Projected Fppg', 'xFppg', 'AGE', 'GP', 'Draft Overall', 'Draft Round'):
         if c in df: df[c] = pd.to_numeric(df[c], errors='coerce')
     if 'Positions' not in df: df['Positions'] = ''
     if fantasy is not None and not fantasy.empty and 'ESPN Player' in fantasy:
@@ -263,7 +324,7 @@ def _normalize(projections, fantasy, historical_stats=None, current_season=None)
     df = df.drop_duplicates('Player ID').copy()
     # Value players against assets actually rostered in this fantasy league.
     # Free agents should not dilute elite rank or make an average player elite.
-    ranking = df['Projected Fppg'] * df['AGE'].apply(_dynasty_multiplier)
+    ranking = df['Projected Fppg'] * (.90 + .10 * df['AGE'].apply(_dynasty_multiplier))
     rostered = ~df['Fantasy Team'].isin(['FA', ''])
     rostered_ranks = ranking.loc[rostered].rank(method='min', ascending=False)
     df['_Value Rank'] = float('nan')
@@ -329,32 +390,11 @@ def _trade_roster_adjustments(roster, outgoing, incoming, waiver_value):
     return -cost, dropped
 
 
-def _two_for_one_consolidation_discount(two_players, single_player, value_fn):
-    """Non-additive bundle discount for the side receiving two for one.
-
-    Two roster players are not fully interchangeable with a single elite asset.
-    Discount only the LESS valuable piece, increasingly when the single player
-    is a scarce top-ranked talent. This is a trade-comparison adjustment, not
-    a change to player projections or standalone dynasty values.
-    """
-    if len(two_players) != 2 or single_player is None:
-        return 0.0
-    values = sorted((max(0.0, float(value_fn(p))) for p in two_players))
-    rank = pd.to_numeric(single_player.get('_Value Rank'), errors='coerce')
-    if pd.isna(rank) or rank <= 0:
-        rank = 150.0
-    # Top-5: ~70% discount on the second piece; rank 30: ~45%;
-    # rank 100+: ~20%. Do not double-count the full weaker player.
-    fraction = .18 + .55 * math.exp(-(float(rank) - 1.0) / 34.0)
-    return values[0] * fraction
-
-
 def suggest_trades(projections, focus_team, outgoing_ids, fantasy=None, fairness=.15, max_results=10, historical_stats=None, current_season=None):
-    """Suggest 1-for-1, 2-for-1 and 2-for-2 trades without lineup optimization.
+    """Suggest 1-for-1 or 2-for-2 dynasty trades without lineup optimization.
 
-    Return up to ten league-wide offers, ranked by your dynasty gain, considering roster spots, elite scarcity,
-    and a non-additive two-for-one consolidation discount. Perceived fairness
-    uses the same structure with market-facing player values.
+    Both sides exchange the same number of players. A 15% projected-Fppg
+    safeguard is applied before dynasty and perceived-market valuation.
     """
     columns = ['Fantasy Team', 'You Give', 'You Get', 'Give IDs', 'Get IDs',
                'Your Dynasty Gain', 'Their Dynasty Gain', 'Perceived Difference',
@@ -367,46 +407,27 @@ def suggest_trades(projections, focus_team, outgoing_ids, fantasy=None, fairness
     given = [p for p in yours if str(p['Player ID']) in ids]
     if len(given) != len(ids) or len(given) not in (1, 2):
         return pd.DataFrame(columns=columns)
-    give_ids = {str(p['Player ID']) for p in given}
     league_teams = df.loc[~df['Fantasy Team'].isin(['FA', '']), 'Fantasy Team'].nunique()
     give_perceived = sum(_seller_value(p, league_teams) for p in given)
-    replacement = _replacement_value(df)
     qualifying_all = []
     fallback_all = []
     opponents = df[~df['Fantasy Team'].isin(['FA', '', focus_team])]
     for team, group in opponents.groupby('Fantasy Team', sort=True):
         theirs = group.to_dict('records')
-        for count in (1, 2):
+        # Only like-for-like packages: one for one, or two for two.
+        for count in (len(given),):
             for received in combinations(theirs, count):
-                recv_ids = {str(p['Player ID']) for p in received}
+                # Production matters to managers competing this season.
+                if not _production_match(given, received):
+                    continue
                 receive_perceived = sum(_seller_value(p, league_teams) for p in received)
-                # Trade deltas depend only on the exchanged players, not on
-                # ESPN's reported roster size (which can include IR slots).
-                your_roster_effect, your_drops = _trade_roster_adjustments(
-                    yours, given, received, replacement)
-                their_roster_effect, their_drops = _trade_roster_adjustments(
-                    theirs, received, given, replacement)
+                # Equal-size trades do not create a roster vacancy or a forced
+                # cut. Compare full dynasty values and market-facing asking
+                # prices, without a misleading two-for-one bundle adjustment.
                 exchange_delta = sum(_player_value(p) for p in received) - sum(_player_value(p) for p in given)
-                # A two-player package is worth less than the simple sum when
-                # acquiring a scarce single asset. Apply the discount to the
-                # side receiving TWO, regardless of which team that is.
-                your_bundle_cost = (_two_for_one_consolidation_discount(received, given[0], _player_value)
-                                    if len(received) == 2 and len(given) == 1 else 0.0)
-                their_bundle_cost = (_two_for_one_consolidation_discount(given, received[0], _player_value)
-                                     if len(given) == 2 and len(received) == 1 else 0.0)
-                your_gain = exchange_delta + your_roster_effect - your_bundle_cost
-                their_gain = -exchange_delta + their_roster_effect - their_bundle_cost
-                # Perceived fairness is a separate market-facing calculation.
-                # Use the same consolidation logic with perceived asset values,
-                # rather than assuming two lesser players equal one star.
-                your_market_cost = (_two_for_one_consolidation_discount(
-                    received, given[0], lambda p: _seller_value(p, league_teams))
-                    if len(received) == 2 and len(given) == 1 else 0.0)
-                their_market_cost = (_two_for_one_consolidation_discount(
-                    given, received[0], lambda p: _seller_value(p, league_teams))
-                    if len(given) == 2 and len(received) == 1 else 0.0)
-                perceived_diff = ((receive_perceived - give_perceived)
-                                  + your_roster_effect - your_market_cost + their_market_cost)
+                your_gain = exchange_delta
+                their_gain = -exchange_delta
+                perceived_diff = receive_perceived - give_perceived
 
                 # A fair-looking offer must be near the seller's asking value.
                 # Never use a fallback to advertise wildly uneven superstar deals.
@@ -414,11 +435,11 @@ def suggest_trades(projections, focus_team, outgoing_ids, fantasy=None, fairness
                 fallback_tolerance = max(6.0, give_perceived * .20)
                 # A manager should not surrender a cornerstone for a substantial
                 # dynasty-value loss, regardless of apparent draft reputation.
-                max_their_loss = max(5.0, give_perceived * .08)
+                max_their_loss = max(2.0, give_perceived * .06)
                 # Keep the closest offers as a transparent fallback. A strict
                 # fairness gate can otherwise hide every player in a league.
                 score = your_gain - .15 * abs(perceived_diff) + .10 * their_gain
-                note = (f"You drop: {', '.join(p['Player'] for p in your_drops)}. " if your_drops else '') + (f"They drop: {', '.join(p['Player'] for p in their_drops)}." if their_drops else '')
+                note = ''  # Equal-sized swaps have no roster-slot adjustment.
                 item = {'Fantasy Team': team, 'You Give': ' + '.join(p['Player'] for p in given),
                     'You Get': ' + '.join(p['Player'] for p in received),
                     'Give IDs': tuple(str(p['Player ID']) for p in given),

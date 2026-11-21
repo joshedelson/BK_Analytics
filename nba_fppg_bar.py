@@ -14,7 +14,7 @@ def render_fppg_bar(percentiles, expected_percentiles, player_row, return_html=F
     xp = float(xp) if xp is not None and pd.notna(xp) else None
     color = _color(p) if p is not None else '#4d5b6b'
     # Height matches the 320px wheel diameter. Both start at the same y.
-    x, y, w, h = 67, 65, 36, 320
+    x, y, w, h = 69.64, 65, 30.72, 320
     bottom = y + h
     pieces = [
         '<defs><pattern id="expected-stripes" width="8" height="8" patternUnits="userSpaceOnUse" '
@@ -24,7 +24,7 @@ def render_fppg_bar(percentiles, expected_percentiles, player_row, return_html=F
     ]
     for t in (0, 25, 50, 75, 100):
         ty = bottom - h * t / 100
-        pieces.append(f'<line x1="35" x2="139" y1="{ty:.2f}" y2="{ty:.2f}" stroke="#8793a4" stroke-opacity=".23"/>')
+        pieces.append(f'<line x1="48" x2="126" y1="{ty:.2f}" y2="{ty:.2f}" stroke="#8793a4" stroke-opacity=".23"/>')
         if t in (0, 50, 100):
             pieces.append(f'<text x="30" y="{ty+3:.2f}" fill="#aab6c7" font-size="10" text-anchor="end">{t}</text>')
     pieces.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="3" fill="#252d39" stroke="#586476"/>')

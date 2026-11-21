@@ -78,7 +78,7 @@ rb.addEventListener('click',()=>show('radar'));
 </script></body></html>"""
     markup = markup.replace("__WHEEL__", wheel_svg).replace("__RADAR__", radar_svg)
     import streamlit.components.v1 as components
-    components.html(markup, height=475, scrolling=False)
+    components.html(markup, height=495, scrolling=False)
 
 
 def load_scoring_presets():
@@ -683,10 +683,10 @@ def as_per_game(frame):
 # Display order only; original dataset names and calculations are unchanged.
 STAT_PAIRS = [
     ('Fpts', 'xFpts'), ('Fppg', 'xFppg'),
+    ('FG%', 'xFG%'), ('3PT%', 'x3P%'), ('FT%', 'xFT%'),
     ('PTS', 'xPTS'), ('FGM', 'xFGM'), ('FTM', 'xFTM'),
     ('3PM', 'x3PM'), ('REB', 'xREB'), ('AST', 'xAST'),
     ('STL', 'xSTL'), ('BLK', 'xBLK'), ('TOV', 'xTO'),
-    ('FG%', 'xFG%'), ('3PT%', 'x3P%'), ('FT%', 'xFT%'),
 ]
 
 
@@ -720,9 +720,10 @@ def ordered_stats_columns(columns):
 VISIBLE_STATS = [
     'Season', 'Player', 'Team', 'Fantasy Team', 'Positions', 'AGE', 'GP', 'MIN', 'USG%',
     'Fpts', 'xFpts', 'Fppg', 'xFppg', '+-Fppg',
+    'FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%',
     'PTS', 'xPTS', 'FGM', 'xFGM', 'FTM', 'xFTM', '3PM', 'x3PM',
     'REB', 'xREB', 'AST', 'xAST', 'STL', 'xSTL', 'BLK', 'xBLK',
-    'TOV', 'xTO', 'FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%',
+    'TOV', 'xTO',
     'FGA', '3PA', 'FTA', 'OREB', 'DREB', 'PF', '+-', 'DD2', 'TD3',
     'FG%+', '3P%+', 'Contested Shots', 'Contested 2PT',
     'Contested 3PT', 'Deflections', 'Charges Drawn',
@@ -1148,6 +1149,7 @@ def render_main_stats_section():
             # All existing filters, ranks, calculations, and CSV exports stay in Python.
             compact_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
             compact_view['Player ID'] = table_data['Player ID'].to_numpy() if 'Player ID' in table_data else None
+            compact_view['Team ID'] = table_data['Team ID'].to_numpy() if 'Team ID' in table_data else None
             compact_view['Season'] = table_data['Season'].to_numpy() if 'Season' in table_data else ''
             compact_view['Team'] = table_data['Team'].fillna('').to_numpy() if 'Team' in table_data else ''
             compact_view['Positions'] = table_data['Positions'].fillna('').to_numpy() if 'Positions' in table_data else ''
@@ -1166,7 +1168,7 @@ def render_main_stats_section():
                 sort_stat='Rk', theme_bg=st.get_option('theme.backgroundColor') or '#0e1117',
                 theme_fg=st.get_option('theme.textColor') or '#fafafa',
                 theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
-                stat_mode=stat_mode, logo_url=nba_team_logo)
+                stat_mode=stat_mode, logo_url=nba_team_logo, show_player_id=True)
             click = _nba_compact_click(
                 html=html_doc, height=min(585, 34 + 41 * len(compact_view)),
                 key='nba_main_compact_click')
@@ -1251,7 +1253,7 @@ def render_main_stats_section():
                                             top_player_id = str(candidates.loc[candidates['Fpts'].idxmax(), 'Player ID'])
                                             default_option = next((opt for opt in options if opt[1] == top_player_id), options[0])
                                 st.session_state['quick_view_player'] = default_option
-                            _player_select_col, _year_select_col, _filter_spacer = st.columns([3, 1, 5.1], vertical_alignment='bottom')
+                            _player_select_col, _year_select_col, _filter_spacer = st.columns([1.5, 1, 6.6], vertical_alignment='bottom')
                             with _player_select_col:
                                 choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
                                                       key='quick_view_player')
@@ -1285,6 +1287,13 @@ def render_main_stats_section():
                                 [1.55, 2.58, 0.72, 1.35, 0.18], gap="small", vertical_alignment="top"
                             )
                             with photo:
+                                # Align the bio title with Percentile Rankings and
+                                # the season Overview heading in adjacent columns.
+                                st.markdown(
+                                    '<div style="width:100%;text-align:center;font-weight:800;'
+                                    'font-size:1rem;line-height:1.5;margin:0 0 2px">Player Bio</div>',
+                                    unsafe_allow_html=True,
+                                )
                                 url = player_headshot(choice[1])
                                 if url:
                                     st.image(url, width=280)
@@ -1390,11 +1399,13 @@ def render_main_stats_section():
                             for col in columns:
                                 if col in rate_cols or col == 'USG%':
                                     view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                        lambda v: '' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
+                                        lambda v: '—' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
                                 elif col not in ('Season', 'Team', 'Positions'):
                                     view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                        lambda v: '' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
-                            return view
+                                        lambda v: '—' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
+                            # Display-only substitution: leave the source frame
+                            # and numeric data unchanged for calculations and charts.
+                            return view.fillna('—').replace({'': '—'})
 
                         if not overview_rows.empty:
                             summary = overview_rows.iloc[0]
@@ -1541,7 +1552,7 @@ def render_main_stats_section():
                                 # or the Overview's horizontal position.
                                 st.markdown('''<style>
 .st-key-quick_fppg_shift iframe {
-    transform: translateX(-54px);
+    transform: translateX(-114px);
     overflow: visible;
 }
 </style>''', unsafe_allow_html=True)
@@ -1552,7 +1563,7 @@ def render_main_stats_section():
                                     )
 
                             st.markdown('**Season - Stats**')
-                            pg_columns = [c for c in ['Season', 'Team', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
+                            pg_columns = [c for c in ['Season', 'Team', 'AGE', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
                                           [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
                                                             ('FT%', 'xFT%'), ('PTS', 'xPTS'),
                                                             ('REB', 'xREB'), ('AST', 'xAST'),
@@ -1573,7 +1584,7 @@ render_main_stats_section()
 from fantasy_analysis import fantasy_analysis_table
 
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_fantasy_analysis(season_tuple, category_tuple, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot, scoring_signature):
+def cached_fantasy_analysis_shooting_v2(season_tuple, category_tuple, fantasy_year, refresh_stamp, dataset_stamp, fantasy_snapshot, scoring_signature):
     source = cached_combined(season_tuple, category_tuple, scoring_signature=scoring_signature)
     return fantasy_analysis_table(source, fantasy_snapshot, fantasy_year)
 
@@ -1588,7 +1599,7 @@ def fantasy_team_analysis():
             _status = cached_status()
             _cached = _status['Season'].dropna().astype(str).unique().tolist()
             _dataset_stamp = tuple(_status[['Season', 'Category', 'Updated']].astype(str).itertuples(index=False, name=None))
-            _table = cached_fantasy_analysis(tuple(sorted(_cached)), tuple(CATEGORIES),
+            _table = cached_fantasy_analysis_shooting_v2(tuple(sorted(_cached)), tuple(CATEGORIES),
                                              fantasy_year, str(fantasy_updated), _dataset_stamp, fantasy_frame, active_scoring_signature())
         except Exception as exc:
             st.warning(f'Fantasy analysis unavailable: {exc}')
@@ -1673,9 +1684,11 @@ def fantasy_team_analysis():
                                   + _viewer_identity.map(lambda identity: f' · {identity}' if identity else ''))
         _display = _display.rename(columns={'Positions': 'Pos'})
         _show = [c for c in ['Rk', 'Headshot', 'Player', 'GP',
-            'Fpts', 'xFpts', 'Fppg', 'xFppg', 'PTS', 'xPTS', 'AST', 'xAST',
+            'Fpts', 'xFpts', 'Fppg', 'xFppg',
+            'FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%',
+            'PTS', 'xPTS', 'AST', 'xAST',
             'REB', 'xREB', 'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO',
-            'FG%', 'xFG%', 'FT%', 'xFT%', '3PT%', 'x3P%'] if c in _display]
+            ] if c in _display]
         _percent_cols = [c for c in _show if '%' in c]
         for _c in _percent_cols:
             _display[_c] = pd.to_numeric(_display[_c], errors='coerce') * 100
@@ -1785,125 +1798,89 @@ def positive_regression_view():
         elif confidence == 'High':
             shown = shown.loc[shown['Confidence'].eq('High')]
         def render_regression_tab(tab_name, metric):
-            # Use only the relevant direction; all ranks are calculated before filtering.
+            # Reuse the main table's browser-side sorter and player-click bridge.
             required = {'Projected Fppg', 'Projected Rank', 'Fppg', 'xFppg', 'MPG', metric}
             missing = required.difference(data.columns)
             if missing:
-                st.warning('Regression data is missing columns: ' + ', '.join(sorted(missing)) +
-                           '. Update fantasy_analysis.py, clear Streamlit cache, and restart.')
+                st.warning('Regression data is missing: ' + ', '.join(sorted(missing)))
                 return
             results = shown.loc[pd.to_numeric(shown[metric], errors='coerce').gt(0)].copy()
             results = results.sort_values(metric, ascending=False)
             if results.empty:
                 st.info('No players meet the selected criteria.')
                 return
-            # Lightweight, deterministic explanation based on the actual signals.
-            # No AI calls, network traffic, or recomputation of projections.
-            def explain(row):
-                def val(col):
-                    v = pd.to_numeric(row.get(col), errors='coerce')
-                    return float(v) if pd.notna(v) else None
-                actual, expected, historical = val('Fppg'), val('xFppg'), val('Historical Fppg')
-                projected, minutes, projected_minutes = val('Projected Fppg'), val('MPG'), val('Projected MPG')
-                usage_change = val('Usage Change')
-                if actual is None or projected is None:
-                    return 'Insufficient data to explain the projection.'
-                diff = projected-actual
-                direction = 'higher' if diff > 0 else 'lower'
-                pieces = [f'Projected {abs(diff):.1f} Fppg {direction} than current production']
-                if expected is not None:
-                    gap = expected-actual
-                    if gap > 1:
-                        pieces.append(f'expected stats suggest +{gap:.1f} Fppg')
-                    elif gap < -1:
-                        pieces.append(f'expected stats suggest {gap:.1f} Fppg')
-                    else:
-                        pieces.append('expected stats are near actual production')
-                if historical is not None:
-                    hist_gap = historical-actual
-                    if hist_gap > 2:
-                        pieces.append('historical production supports a rebound')
-                    elif hist_gap < -2:
-                        pieces.append('historical production is below the current pace')
-                    else:
-                        pieces.append('historical production is similar')
-                shooting = [(label, val(col)) for label, col in (
-                    ('FG%', 'FG Expected Gap'), ('3P%', '3P Expected Gap'),
-                    ('FT%', 'FT Expected Gap'))]
-                shooting = [(label, gap) for label, gap in shooting if gap is not None]
-                if shooting:
-                    label, gap = max(shooting, key=lambda item: abs(item[1]))
-                    if abs(gap) >= 2:
-                        pieces.append(f'{label} expected vs actual {gap:+.1f} percentage points')
-                if minutes is not None and projected_minutes is not None and abs(projected_minutes-minutes) >= 1.5:
-                    pieces.append(f'minutes projected {projected_minutes-minutes:+.1f} MPG vs current')
-                if usage_change is not None and abs(usage_change) >= 2:
-                    pieces.append(f'usage {usage_change:+.1f} pts vs last season')
-                return '. '.join([pieces[0], '; '.join(pieces[1:])]).rstrip('.') + '.'
-
-            results['Why'] = results.apply(explain, axis=1)
-            results['Player'] = (results['Player'].fillna('').astype(str) + ' · ' +
-                                 results.get('Team', pd.Series('', index=results.index)).fillna('').astype(str))
-            results['Headshot'] = results['Player ID'].map(player_headshot)
-            # Rank all eligible current-season players by actual Fppg, not the filtered subset.
-            # Display and sorting use native numeric types; formatting happens in column_config.
-            results['Current Rank'] = pd.to_numeric(results['Player ID'].astype('string').map(current_rank_lookup), errors='coerce')
-            columns = ['Headshot', 'Player', 'Fantasy Team', 'Current Rank', 'Projected Rank', 'GP',
+            results['Current Rank'] = pd.to_numeric(
+                results['Player ID'].astype('string').map(current_rank_lookup), errors='coerce')
+            columns = ['Player', 'Current Rank', 'Projected Rank', 'GP',
                        'Fppg', 'xFppg', 'Historical Fppg', 'Projected Fppg',
-                       'MPG', 'Projected MPG', 'USG%', 'Usage Change', 'Confidence',
-                       metric, 'Why']
+                       'MPG', 'Projected MPG', 'USG%', 'Usage Change', 'Confidence', metric]
             display = results[[c for c in columns if c in results.columns]].copy()
-            numeric_cols = {'Current Rank', 'Projected Rank', 'GP', 'Fppg', 'xFppg', 'Historical Fppg',
-                            'Projected Fppg', 'Projected MPG', 'MPG', 'USG%',
-                            'Usage Change', 'ROS Upside', 'Sell-High Gap'}
-            for col in numeric_cols.intersection(display.columns):
-                display[col] = pd.to_numeric(display[col], errors='coerce')
-            # Usage is stored as a fraction (e.g. 0.24); show it as 24.0%.
-            for usage_col in ('USG%', 'Usage Change'):
-                if usage_col in display.columns:
-                    display[usage_col] = display[usage_col] * 100
-            descriptions = {
-                'Current Rank': ('Rk', 'Current-season rank by actual fantasy points per game across all players.'),
-                'Fantasy Team': ('F. Team', 'ESPN fantasy team; FA means free agent.'),
-                'Projected Rank': ('Proj Rk', 'Rank by projected Fppg across the entire current-season player pool.'),
-                'Historical Fppg': ('Hist Fppg', 'Historical fantasy production adjusted for age and playing time.'),
-                'Projected Fppg': ('Proj Fppg', 'Rest-of-season fantasy points per game forecast.'),
-                'Projected MPG': ('Proj MPG', 'Projected MPG: current-season role weighted most, with a games-played-weighted three-season prior.'),
-                'MPG': ('MPG', 'Current-season minutes per game.'),
-                'Usage Change': ('USG Δ', 'Current usage minus a games-played-weighted recent historical baseline, in percentage points.'),
-                'ROS Upside': ('Buy Δ', 'Projected Fppg minus current Fppg. Positive values suggest buy-low upside.'),
-                'Sell-High Gap': ('Sell Δ', 'Current Fppg minus projected Fppg. Positive values suggest sell-high downside.'),
-                'Why': ('Why', 'Short explanation of the projection based on expected stats, history, minutes, and usage.'),
-            }
-            config = {
-                'Headshot': st.column_config.ImageColumn('Headshot', width='small'),
-                'Player': st.column_config.TextColumn('Player', width=250),
-                'Why': st.column_config.TextColumn('Why', width='large', help=descriptions['Why'][1]),
-            }
-            for col in display.columns:
-                if col in config:
-                    continue
-                label, tip = descriptions.get(col, (col, EXPECTED_STAT_HELP.get(col, col)))
-                if col in numeric_cols:
-                    config[col] = st.column_config.NumberColumn(
-                        label, format='%d' if col in {'Current Rank', 'Projected Rank', 'GP'} else ('%.1f%%' if col in {'USG%', 'Usage Change'} else '%.2f'), help=tip)
-                else:
-                    config[col] = st.column_config.TextColumn(label, help=tip)
-            selected = st.dataframe(
-                display, hide_index=True, use_container_width=True, height=600, row_height=35,
-                key=f"regression_{tab_name}_selection_v087_{st.session_state.get('regression_selection_epoch', 0)}",
-                on_select='rerun', selection_mode='single-row', column_config=config)
-            rows = selected.selection.rows
-            if rows:
-                idx = rows[0]
-                if 0 <= idx < len(results):
-                    target_id = str(results.iloc[idx]['Player ID'])
-                    st.session_state['regression_quick_view_request'] = target_id
-                    st.session_state['regression_selection_epoch'] = (
-                        st.session_state.get('regression_selection_epoch', 0) + 1)
-                    st.rerun(scope='app')
+            display.rename(columns={
+                'Current Rank': 'Rk',
+                'Projected Rank': 'Proj. Rk',
+                'Historical Fppg': 'hFppg',
+                'Projected Fppg': 'pFppg',
+                'Projected MPG': 'Proj. MPG',
+                'Usage Change': 'ΔUSG',
+            }, inplace=True)
+            for col in ('Rk', 'Proj. Rk', 'GP', 'Fppg', 'xFppg',
+                        'hFppg', 'pFppg', 'Proj. MPG',
+                        'MPG', 'USG%', 'ΔUSG', metric):
+                if col in display:
+                    display[col] = pd.to_numeric(display[col], errors='coerce')
+            for col in ('USG%', 'ΔUSG'):
+                if col in display:
+                    display[col] = display[col] * 100
+            display['Player ID'] = results['Player ID'].to_numpy()
+            display['Season'] = '2026-27' if str(fantasy_year) == '2027' else str(fantasy_year)
+            display['Team'] = (results['Team'].fillna('').astype(str).to_numpy()
+                               if 'Team' in results else '')
+            display['Positions'] = (results['Positions'].fillna('').astype(str).to_numpy()
+                                    if 'Positions' in results else '')
+            display['Headshot'] = results['Player ID'].map(player_headshot).to_numpy()
+            display['Injury'] = ''
+            # Reuse ESPN's saved fantasy-team abbreviation. Do not infer one
+            # from a team's name; leave unmatched/unrostered players unbadged.
+            if 'Fantasy Abbrev' in results.columns:
+                _badges = results['Fantasy Abbrev']
+            elif {'Fantasy Team', 'Fantasy Abbrev'}.issubset(fantasy_frame.columns):
+                _owners = fantasy_frame[['Fantasy Team', 'Fantasy Abbrev']].dropna(
+                    subset=['Fantasy Team', 'Fantasy Abbrev']).copy()
+                _owners['Fantasy Team'] = _owners['Fantasy Team'].astype(str).str.strip()
+                _owners['Fantasy Abbrev'] = _owners['Fantasy Abbrev'].astype(str).str.strip()
+                _owners = _owners.loc[_owners['Fantasy Abbrev'].ne('')].drop_duplicates('Fantasy Team')
+                _badges = results['Fantasy Team'].map(
+                    _owners.set_index('Fantasy Team')['Fantasy Abbrev'])
+            else:
+                _badges = pd.Series('', index=results.index)
+            display['Fantasy'] = _badges.fillna('').astype(str).str.strip().str.upper().to_numpy()
+            display['_focus'] = False
+            display['_name'] = results['Player'].fillna('').astype(str).to_numpy()
+            html_doc = render_nba_html(
+                display, selected_focus=None, freeze_player=False, sort_stat=metric,
+                theme_bg=st.get_option('theme.backgroundColor') or '#0e1117',
+                theme_fg=st.get_option('theme.textColor') or '#fafafa',
+                theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
+                stat_mode='Per Game', logo_url=nba_team_logo, compact_player=True, show_rank=False)
+            clicked = _nba_compact_click(
+                html=html_doc, height=min(585, 34 + 41 * len(display)),
+                key=f'nba_regression_{tab_name}_compact_click')
+            if isinstance(clicked, dict) and clicked.get('player_id'):
+                try:
+                    pid = str(int(clicked['player_id']))
+                    token = (pid, clicked.get('nonce'))
+                    state_key = f'_nba_regression_last_click_{tab_name}'
+                    if token != st.session_state.get(state_key):
+                        st.session_state[state_key] = token
+                        st.session_state['regression_quick_view_request'] = pid
+                        st.rerun(scope='app')
+                except (TypeError, ValueError):
+                    pass
+            csv_columns = [c for c in display.columns if c not in (
+                'Player ID', 'Season', 'Team', 'Positions', 'Headshot', 'Injury',
+                'Fantasy', '_focus', '_name')]
             st.download_button('Export ' + tab_name + ' rankings to CSV',
-                               display.drop(columns=['Headshot'], errors='ignore').to_csv(index=False).encode('utf-8-sig'),
+                               display[csv_columns].to_csv(index=False).encode('utf-8-sig'),
                                file_name=f'nba_{tab_name}_regression.csv', mime='text/csv',
                                key=f'regression_export_{tab_name}')
 

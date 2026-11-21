@@ -17,7 +17,14 @@ def fantasy_analysis_table(nba, fantasy, season):
     if joined.empty:
         return pd.DataFrame()
     joined['Fantasy Team'] = joined['Fantasy Team'].fillna('FA').replace('', 'FA')
+    # Preserve the full shooting-stat schema across datasets/seasons. Missing
+    # source statistics stay NA, never substituted with made-up percentages.
+    shooting_cols = ('FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%')
+    for col in shooting_cols:
+        if col not in joined.columns:
+            joined[col] = float('nan')
     stat_cols = ('Fpts', 'xFpts', 'Fppg', 'xFppg', '+-Fppg', 'GP', 'MIN',
+                 'FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%',
                  'PTS', 'xPTS', 'AST', 'xAST', 'REB', 'xREB', 'STL', 'xSTL',
                  'BLK', 'xBLK', 'TOV', 'xTO')
     for col in stat_cols:
