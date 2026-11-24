@@ -43,23 +43,39 @@ def _svg_from_html(chart_html):
 
 
 def render_quick_chart_switch(wheel_html, radar_html):
+    # Preserve the native SVG font sizes while retaining 75%-scale geometry.
     wheel_svg = _svg_from_html(wheel_html)
     radar_svg = _svg_from_html(radar_html)
+    # Increase numeric annotations only; retain chart geometry and stat-name labels.
+    def _enlarge_numeric_svg_text(svg):
+        def change(match):
+            opening, body, closing = match.groups()
+            if not re.search(r'\d', re.sub(r'<[^>]*>', '', body)):
+                return match.group(0)
+            def size_up(m):
+                return m.group(1) + str(round(float(m.group(2)) * 1.1, 2)) + m.group(3)
+            opening = re.sub(r'(font-size=[\"\'])([\d.]+)([\"\'])', size_up, opening)
+            return opening + body + closing
+        return re.sub(r'(<text\b[^>]*>)(.*?)(</text>)', change, svg, flags=re.S)
+    wheel_svg = _enlarge_numeric_svg_text(wheel_svg)
+    radar_svg = _enlarge_numeric_svg_text(radar_svg)
     markup = """<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}body{position:relative}
-.chart-switch{position:absolute;top:4px;left:8px;z-index:2;display:flex;align-items:center;justify-content:flex-start;gap:7px;margin:0;font-size:12px;color:#cbd5e1}
-.chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:7px;color:#cbd5e1;padding:5px 11px;cursor:pointer;font:inherit}
+.chart-heading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:24px;margin:0 0 2px;font-size:16px;font-weight:700;white-space:nowrap}
+.chart-switch{display:flex;align-items:center;gap:5px;font-size:9px;color:#cbd5e1;font-weight:400}
+.chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:5px;color:#cbd5e1;padding:4px 8px;cursor:pointer;font:inherit}
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
-.chart{max-width:540px;margin:auto}
+.chart{width:75%;max-width:405px;margin:0 auto}
 .chart svg{width:100%;height:auto;display:block}
 .chart[hidden]{display:none!important}
 </style></head><body>
+<div class="chart-heading"><span>Percentile Rankings</span>
 <div class="chart-switch" role="group" aria-label="Percentile chart style">
-  <button id="wheel-btn" type="button" aria-pressed="true">Wheel</button>
-  <button id="radar-btn" type="button" aria-pressed="false">Radar</button>
-</div>
+  <button id="wheel-btn" type="button" aria-label="Wheel" title="Wheel" aria-pressed="true">1</button>
+  <button id="radar-btn" type="button" aria-label="Radar" title="Radar" aria-pressed="false">2</button>
+</div></div>
 <div id="wheel-chart" class="chart">__WHEEL__</div>
 <div id="radar-chart" class="chart" hidden>__RADAR__</div>
 <script>
@@ -78,7 +94,7 @@ rb.addEventListener('click',()=>show('radar'));
 </script></body></html>"""
     markup = markup.replace("__WHEEL__", wheel_svg).replace("__RADAR__", radar_svg)
     import streamlit.components.v1 as components
-    components.html(markup, height=495, scrolling=False)
+    components.html(markup, height=390, scrolling=False)
 
 
 def load_scoring_presets():
@@ -1425,25 +1441,25 @@ def render_main_stats_section():
                                 st.session_state.setdefault('quick_view_scope_choice', 'All')
                                 st.markdown('''<style>
 .st-key-quick_rank_compact [data-testid="stButton"] button {
-    min-height: 1.65rem !important; height: 1.65rem !important;
-    padding: 0 .3rem !important; font-size: .72rem !important;
+    min-height: 1.35rem !important; height: 1.35rem !important;
+    padding: 0 .2rem !important; font-size: .65rem !important;
     border-radius: 5px !important;
 }
 .st-key-quick_rank_compact [data-testid="stVerticalBlock"] {
-    gap: .50rem !important;
+    gap: .48rem !important;
 }
 .st-key-quick_rank_compact [data-testid="stHorizontalBlock"] {
-    gap: .4rem !important;
+    gap: .5rem !important;
 }
 .st-key-quick_rank_compact .quick-rank-heading {
-    font-size: .94rem; font-weight: 700; line-height: 1.4;
-    display:block; padding: 0 0 8px; margin: 0;
+    font-size: .82rem; font-weight: 700; line-height: 1.25;
+    display:block; min-height: 27px; padding: 0 0 9px; margin: 0; white-space:nowrap;
 }
 </style>''', unsafe_allow_html=True)
                                 with st.container(key='quick_rank_compact'):
-                                    _rank_buttons_col, _rank_divider_col, _scope_buttons_col = st.columns([1.65, 0.09, 1], gap='small')
+                                    _rank_buttons_col, _rank_divider_col, _scope_buttons_col = st.columns([1.4, 0.08, 1.1], gap='small')
                                     with _rank_divider_col:
-                                        st.markdown('<div style="border-left:1px solid #4a5261;height:67px;margin:12px auto 0;width:1px"></div>', unsafe_allow_html=True)
+                                        st.markdown('<div style="border-left:1px solid #4a5261;height:55px;margin:10px auto 0;width:1px"></div>', unsafe_allow_html=True)
                                     with _rank_buttons_col:
                                         st.markdown('<div class="quick-rank-heading">Rank by</div>', unsafe_allow_html=True)
                                         for _pair in (('Fppg', 'Fpts'), ('xFppg', 'xFpts')):
@@ -1466,7 +1482,6 @@ def render_main_stats_section():
                                                 key=f'quick_scope_btn_{_option}',
                                                 use_container_width=True,
                                                 type=('primary' if st.session_state['quick_view_scope_choice'] == _option else 'secondary'),
-                                                help=('All players' if _option == 'All' else 'Same primary ESPN position'),
                                             ):
                                                 st.session_state['quick_view_scope_choice'] = _option
                                                 st.rerun(scope='fragment')
@@ -1507,12 +1522,12 @@ def render_main_stats_section():
                                         else:
                                             shown = f'{value:,.1f}'
                                         _metric_html.append(
-                                            '<div style="padding:12px 9px;border:1px solid #303640;'
+                                            '<div style="padding:8px 7px;border:1px solid #303640;'
                                             'border-radius:7px;background:#11151c;min-width:0">'
-                                            f'<div style="color:#c2cbd8;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
-                                            f'<div style="color:#f7f8fa;font-size:21px;font-weight:700;line-height:1.25">{_esc_metric(shown)}</div></div>'
+                                            f'<div style="color:#c2cbd8;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
+                                            f'<div style="color:#f7f8fa;font-size:16px;font-weight:700;line-height:1.2">{_esc_metric(shown)}</div></div>'
                                         )
-                                    st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px">'
+                                    st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px">'
                                                 + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
 
                             with _overview_metrics:
@@ -1523,7 +1538,6 @@ def render_main_stats_section():
                                     cached_quick_position_pairs(fantasy_frame), dataset_revision()
                                 )
                             with _wheel_area:
-                                st.markdown('<div style="width:calc(100% + 150px);text-align:center;font-weight:700;font-size:1rem;line-height:1.5;margin:0 0 2px">Percentile Rankings</div>', unsafe_allow_html=True)
                                 from nba_percentile_radar import render_percentile_radar
                                 # Reuse precomputed season-wide distributions rather than
                                 # scanning/ranking every peer on each player selection.
@@ -1552,7 +1566,7 @@ def render_main_stats_section():
                                 # or the Overview's horizontal position.
                                 st.markdown('''<style>
 .st-key-quick_fppg_shift iframe {
-    transform: translateX(-114px);
+    transform: translateX(-135px);
     overflow: visible;
 }
 </style>''', unsafe_allow_html=True)
