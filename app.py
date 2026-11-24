@@ -84,7 +84,7 @@ html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-s
 .chart-switch{display:flex;align-items:center;gap:5px;font-size:9px;font-weight:400}
 .chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:5px;color:#cbd5e1;padding:4px 8px;cursor:pointer;font:inherit}
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
-.visual{width:100%;max-width:500px;margin:0 auto}
+.visual{width:100%;max-width:550px;margin:0 auto}
 .visual>svg{display:block;width:100%;height:auto;overflow:visible}
 [hidden]{display:none!important}
 </style></head><body>
@@ -95,20 +95,20 @@ html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-s
 </div></div>
 <div class="visual"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 485" role="img" aria-label="Player percentile wheel or radar and Fppg bar">
 <svg id="wheel-chart" x="0" y="0" width="540" height="475" viewBox="0 0 500 450">__WHEEL__</svg>
-<svg id="radar-chart" x="0" y="0" width="540" height="475" viewBox="0 0 540 475" hidden>__RADAR__</svg>
-<svg x="530" y="0" width="140" height="450" viewBox="0 0 140 450">__BAR__</svg>
+<svg id="radar-chart" x="0" y="0" width="540" height="475" viewBox="0 0 500 450" display="none">__RADAR__</svg>
+<svg x="520" y="0" width="140" height="450" viewBox="0 0 140 450">__BAR__</svg>
 </svg></div>
 <script>
 const wheel=document.getElementById('wheel-chart'),radar=document.getElementById('radar-chart');
 const wb=document.getElementById('wheel-btn'),rb=document.getElementById('radar-btn');
-function show(mode){const w=mode==='wheel';wheel.hidden=!w;radar.hidden=w;
+function show(mode){const w=mode==='wheel';wheel.setAttribute('display',w?'inline':'none');radar.setAttribute('display',w?'none':'inline');
 wb.setAttribute('aria-pressed',String(w));rb.setAttribute('aria-pressed',String(!w));}
 wb.addEventListener('click',()=>show('wheel'));rb.addEventListener('click',()=>show('radar'));
 </script></body></html>"""
     markup = (markup.replace('__WHEEL__', inner(wheel_svg))
                     .replace('__RADAR__', inner(radar_svg))
                     .replace('__BAR__', bar_inner))
-    components.html(markup, height=390, scrolling=False)
+    components.html(markup, height=430, scrolling=False)
 
 
 def load_scoring_presets():
