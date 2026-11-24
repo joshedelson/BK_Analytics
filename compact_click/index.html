@@ -1,9 +1,24 @@
 <!doctype html><html><head><meta charset="utf-8"><style>
-html,body{margin:0;padding:0;background:transparent;overflow:hidden}iframe{display:block;width:100%;border:0}
+html,body{margin:0;padding:0;background:var(--bg,transparent);overflow:hidden}iframe{display:block;width:100%;border:0}
 </style></head><body><iframe id="grid" title="MLB compact stats grid"></iframe><script>
 const grid=document.getElementById('grid');
 // Copy the app's own font into the table so it matches Streamlit's tables.
 let appFont=null;
+let frozen=false, integrated=false, currentDoc=null, allocated=585;
+function setHeight(height){
+ height=Math.ceil(height);
+ grid.style.height=height+'px';
+ streamlit('streamlit:setFrameHeight',{height});
+}
+function fitTable(){
+ if(!integrated)return;
+ try{
+  const doc=grid.contentDocument, footer=doc.querySelector('.table-footer');
+  if(footer){setHeight(Math.ceil(footer.getBoundingClientRect().bottom)+2);return;}
+ }catch(e){}
+ setHeight(allocated);
+}
+grid.addEventListener('load',fitTable);
 function appFontStyle(){
  if(appFont!==null)return appFont;
  appFont='';
@@ -25,10 +40,19 @@ function streamlit(type,payload){window.parent.postMessage(Object.assign({isStre
 window.addEventListener('message',e=>{
  if(e.source===window.parent && e.data && e.data.type==='streamlit:render'){
   const args=e.data.args||{};
+  const bg=(args.html||'').match(/--bg:\s*([^;]+);/);
+  if(bg)document.documentElement.style.setProperty('--bg',bg[1].trim());
   const doc=(args.html||'').replace('<head>','<head>'+appFontStyle());
-  if(grid.srcdoc!==doc)grid.srcdoc=doc;
-  grid.style.height=(args.height||585)+'px';
-  streamlit('streamlit:setFrameHeight',{height:args.height||585});
+  integrated=!!args.integrated_freeze;
+  allocated=Number(args.height)||585;
+  if(currentDoc!==doc){currentDoc=doc;setHeight(allocated);grid.srcdoc=doc;}
+  else if(integrated)fitTable();
+  if(!integrated){grid.style.height=(args.height||585)+'px';streamlit('streamlit:setFrameHeight',{height:args.height||585});}
+ }
+ if(e.source===grid.contentWindow && e.data && integrated){
+  if(e.data.type==='nba-freeze-change')frozen=!!e.data.value;
+  if(e.data.type==='nba-freeze-ready')grid.contentWindow.postMessage({type:'nba-freeze-state',value:frozen},'*');
+  if(e.data.type==='nba-table-height'){const height=Math.ceil(Number(e.data.height));if(Number.isFinite(height)&&height>0&&height<1000)setHeight(height+2);}
  }
  if(e.source===grid.contentWindow && e.data && e.data.type==='mlb-player-click'){
   streamlit('streamlit:setComponentValue',{value:{player_id:e.data.player_id,year:e.data.year,

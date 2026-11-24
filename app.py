@@ -1194,407 +1194,392 @@ def render_main_stats_section():
                 r'\s+\((?:O|IR|DTD|D|Q|SUSP|OUT)\)$', '', regex=True).to_numpy())
             # The combined Player cell replaces separate Team/Pos/Fantasy columns.
             compact_view = compact_view.drop(columns=['Fantasy Team'], errors='ignore')
-            freeze = st.session_state.get('nba_compact_freeze', False)
+            _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · {database_label()}')
+            if not fantasy_frame.empty:
+                _summary += f' · ESPN {fantasy_matches:,} matched / {fantasy_unmatched:,} unmatched'
             html_doc = render_nba_html(
-                compact_view, selected_focus=focus_fantasy_team, freeze_player=freeze,
+                compact_view, selected_focus=focus_fantasy_team, freeze_player=False,
                 sort_stat='Rk', theme_bg=st.get_option('theme.backgroundColor') or '#0e1117',
                 theme_fg=st.get_option('theme.textColor') or '#fafafa',
                 theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
-                stat_mode=stat_mode, logo_url=nba_team_logo, show_player_id=True)
-            click = _nba_compact_click(
-                html=html_doc, height=min(585, 34 + 41 * len(compact_view)),
-                key='nba_main_compact_click')
-            selected_player_id = None
-            if isinstance(click, dict) and click.get('player_id'):
-                try:
-                    token = (int(click['player_id']), click.get('nonce'))
-                    if token != st.session_state.get('_nba_compact_last_click'):
-                        st.session_state['_nba_compact_last_click'] = token
-                        selected_player_id = str(token[0])
-                        st.session_state['_pending_main_table_player_id'] = selected_player_id
-                        st.session_state['_last_main_table_player_id'] = selected_player_id
-                        selected_year = int(click.get('year') or 0)
-                        if selected_year:
-                            st.session_state[f'quick_view_year_{selected_player_id}'] = selected_year
-                except (TypeError, ValueError):
-                    pass
-            # Compact footer: freeze toggle left, player-season metadata right.
-            # Place the CSS on the footer itself so the rule applies to the preceding table.
-            st.html('''<style>
-            /* The compact table iframe is followed immediately by this footer. */
-            div[data-testid="stElementContainer"]:has(.st-key-nba_main_compact_click) {
-                margin-bottom: -0.9rem !important;
-            }
-            /* Pull the entire footer up toward the table without altering
-               the margins inside the table's scrolling viewport. */
-            .st-key-nba_table_footer {
-                margin-top: -0.65rem !important;
-            }
-            .st-key-nba_table_footer div[data-testid="stHorizontalBlock"] {
-                align-items: center;
-            }
-            </style>''')
-            with st.container(key='nba_table_footer'):
-                _freeze_left, _meta_right = st.columns([1.6, 5], vertical_alignment='center', gap='small')
-                with _freeze_left:
-                    st.toggle('Freeze player column', key='nba_compact_freeze',
-                              help='Keep player names and headshots visible while scrolling horizontally.')
-                with _meta_right:
-                    _summary = (f'{len(df):,} player-season rows · {len(df.columns)} columns · '
-                                f'{database_label()}')
-                    if not fantasy_frame.empty:
-                        _summary += (f' · ESPN {fantasy_matches:,} matched / '
-                                     f'{fantasy_unmatched:,} unmatched')
-                    st.markdown(f'<div style="text-align:right;color:#929ba6;font-size:0.875rem">{_summary}</div>', unsafe_allow_html=True)
+                stat_mode=stat_mode, logo_url=nba_team_logo, show_player_id=True, footer_note=_summary)
             export_view = percent_view.drop(columns=['Headshot'], errors='ignore').copy()
             for c in percent_columns:
                 export_view[c] = export_view[c].map(
                     lambda v: '' if pd.isna(v) else f'{v:.2f}'.rstrip('0').rstrip('.') + '%')
-            st.download_button('Export current view to CSV', export_view.to_csv(index=False).encode('utf-8-sig'),
-                               file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
+            export_bytes = export_view.to_csv(index=False).encode('utf-8-sig')
 
-            def render_player_quick_view():
-                if 'Player' in df.columns and 'Player ID' in df.columns:
-                    with st.expander('🏀 Player Quick View', expanded=True):
-                        options = cached_player_options(df[['Player', 'Player ID']])
-                        if options:
-                            # Regression table can request a player from below this fragment.
-                            # Consume once so ordinary Quick View navigation remains independent.
-                            requested_id = st.session_state.pop('regression_quick_view_request', None)
-                            table_request = st.session_state.pop('_pending_main_table_player_id', None)
-                            # A request is consumed once; the search selectbox then
-                            # owns the active player until another table click.
-                            target_id = requested_id or table_request
-                            current_index = next((i for i, option in enumerate(options)
-                                                  if option[1] == target_id), None) if target_id else None
-                            if current_index is not None:
-                                st.session_state['quick_view_player'] = options[current_index]
-                            elif st.session_state.get('quick_view_player') not in options:
-                                # On a fresh page load, default to the player with the
-                                # most total fantasy points in the latest loaded season.
-                                # Preserve manual choices and table-click navigation.
-                                default_option = options[0]
-                                if {'Season', 'Player ID', 'Fpts'}.issubset(df.columns):
-                                    season_years = pd.to_numeric(season_end_year(df['Season']), errors='coerce')
-                                    if season_years.notna().any():
-                                        latest_year = season_years.max()
-                                        candidates = df.loc[season_years.eq(latest_year), ['Player ID', 'Fpts']].copy()
-                                        candidates['Fpts'] = pd.to_numeric(candidates['Fpts'], errors='coerce')
-                                        candidates = candidates.dropna(subset=['Fpts'])
-                                        if not candidates.empty:
-                                            top_player_id = str(candidates.loc[candidates['Fpts'].idxmax(), 'Player ID'])
-                                            default_option = next((opt for opt in options if opt[1] == top_player_id), options[0])
-                                st.session_state['quick_view_player'] = default_option
-                            _player_select_col, _year_select_col, _filter_spacer = st.columns([1.5, 1, 6.6], vertical_alignment='bottom')
-                            with _player_select_col:
-                                choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
-                                                      key='quick_view_player')
-                            # Show every saved season for this player, independent of
-                            # the sidebar's selected seasons/categories. The selected
-                            # season is displayed first, followed by other years.
-                            quick_seasons = tuple(sorted(set(cached_status()['Season'].dropna().astype(str))))
-                            player_rows = cached_quick_player_rows(quick_seasons, choice[1], dataset_revision())
-                            # The year selector is scoped to the player, so switching
-                            # players automatically selects that player's latest saved season.
-                            season_values = (season_end_year(player_rows['Season'])
-                                             if 'Season' in player_rows.columns
-                                             else pd.Series(dtype='float64'))
-                            available_years = sorted({int(y) for y in season_values.dropna()}, reverse=True)
-                            with _year_select_col:
-                                if available_years:
-                                    selected_year = st.selectbox(
-                                        'Year', available_years,
-                                        format_func=lambda y: f'{y - 1}-{str(y)[-2:]}',
-                                        key=f'quick_view_year_{choice[1]}',
-                                    )
-                                else:
-                                    st.selectbox('Year', ['No saved seasons'], disabled=True)
-                                    selected_year = None
-                            # Keep every saved season for the historical stats table; only
-                            # the overview and identity card follow the Year dropdown.
-                            overview_rows = (player_rows.loc[
-                                season_end_year(player_rows['Season']).eq(selected_year)
-                            ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
-                            photo, _wheel_area, _overview_metrics, _right_margin = st.columns(
-                                [1.55, 3.30, 1.35, 0.18], gap="small", vertical_alignment="top"
-                            )
-                            with photo:
-                                # Align the bio title with Percentile Rankings and
-                                # the season Overview heading in adjacent columns.
-                                st.markdown(
-                                    '<div style="width:100%;text-align:center;font-weight:800;'
-                                    'font-size:1rem;line-height:1.5;margin:0 0 2px">Player Bio</div>',
-                                    unsafe_allow_html=True,
-                                )
-                                url = player_headshot(choice[1])
-                                if url:
-                                    st.image(url, width=280)
-                                else:
-                                    st.caption('No headshot ID available')
+            # Keep the prepared table and export in the parent fragment's closure.
+            # Component clicks rerun only this child fragment, not table preparation.
+            @st.fragment
+            def render_table_and_quick_view():
+                click = _nba_compact_click(
+                    html=html_doc, height=min(585, 34 + 41 * len(compact_view)) + 24,
+                    key='nba_main_compact_click', integrated_freeze=True)
+                selected_player_id = None
+                if isinstance(click, dict) and click.get('player_id'):
+                    try:
+                        token = (int(click['player_id']), click.get('nonce'))
+                        if token != st.session_state.get('_nba_compact_last_click'):
+                            st.session_state['_nba_compact_last_click'] = token
+                            selected_player_id = str(token[0])
+                            st.session_state['_pending_main_table_player_id'] = selected_player_id
+                            st.session_state['_last_main_table_player_id'] = selected_player_id
+                            selected_year = int(click.get('year') or 0)
+                            if selected_year:
+                                st.session_state[f'quick_view_year_{selected_player_id}'] = selected_year
+                    except (TypeError, ValueError):
+                        pass
+                st.download_button('Export current view to CSV', export_bytes,
+                                   file_name=f'nba_combined_{stat_mode.lower().replace(" ", "_")}.csv', mime='text/csv')
 
-                                # Compact identity block, matching the MLB Quick View layout.
-                                # Reuse the already-loaded overview and ESPN lookup; no new API calls.
-                                from html import escape as _html_escape
-                                from espn_fantasy import _normalized_name, player_news_fallback_url
-                                _player_name = str(choice[0])
-                                _identity_row = overview_rows.iloc[0] if not overview_rows.empty else None
-                                _nba_team = str(_identity_row.get('Team', '')).strip() if _identity_row is not None else ''
-                                if _nba_team.lower() in ('nan', 'none'):
-                                    _nba_team = ''
-                                _logo = nba_team_logo(_nba_team) if _nba_team else None
-                                _matches = (cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
-                                            if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns else [])
-                                _espn_row = _matches[0] if len(_matches) == 1 else {}
-                                _espn_id = str(_espn_row.get('ESPN ID', '') or '')
-                                _position = str(_identity_row.get('Positions', '')).strip() if _identity_row is not None else ''
-                                if _position.lower() in ('nan', 'none') or not _position:
-                                    _position = str(_espn_row.get('Positions', '') or '').strip()
-                                if _position.lower() in ('nan', 'none'):
-                                    _position = ''
-                                _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce') if _identity_row is not None else float('nan')
-                                _injury = str(_espn_row.get('Injury', '') or '').strip()
-                                if _injury.lower() in ('nan', 'none', 'healthy', 'active'):
-                                    _injury = ''
-                                _fantasy_team = str(_espn_row.get('Fantasy Team', '') or '').strip()
-                                if _fantasy_team.lower() in ('nan', 'none'):
-                                    _fantasy_team = ''
-                                _pos_team = f"<strong>{_html_escape(_position or '—')}</strong>"
-                                if _nba_team:
-                                    _pos_team += ' &nbsp;|&nbsp; '
-                                    if _logo:
-                                        _pos_team += (f'<img src="{_html_escape(_logo, quote=True)}" '
-                                                      'style="width:24px;height:24px;vertical-align:middle;margin-right:4px">')
-                                    _pos_team += f'<strong>{_html_escape(_nba_team)}</strong>'
-                                _age_text = f'Age: {int(_age)}' if pd.notna(_age) else ''
-                                _rnd, _pick = _espn_row.get('Draft Round'), _espn_row.get('Draft Pick')
-                                if pd.notna(_rnd) and pd.notna(_pick):
-                                    _draft_text = f'Round {int(_rnd)}, Pick {int(_pick)}'
-                                    if pd.notna(_espn_row.get('Draft Overall')):
-                                        _draft_text += f" ({int(_espn_row['Draft Overall'])})"
-                                else:
-                                    _draft_text = '—'
-                                _team_text = _html_escape(_fantasy_team or '—')
-                                _injury_detail, _return_date, _latest_update = '', '', ''
-                                # Match ESPN's public injury report by BOTH player name and team.
-                                # Never pass a fantasy player ID to the ESPN Sports injury endpoint.
-                                if _injury and _nba_team:
-                                    _injury_record = cached_nba_injury_report().get(
-                                        (_normalized_name(_player_name), _nba_team.upper()), {})
-                                    _injury_detail = _injury_record.get('description', '')
-                                    _return_date = _injury_record.get('expected_return', '')
-                                    _latest_update = _injury_record.get('latest_update', '')
-                                _injury_text = _html_escape(
-                                    f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
-                                )
-                                # Status-specific injury note color: serious/unavailable red,
-                                # day-to-day/questionable yellow, healthy/unknown white.
-                                _injury_upper = _injury.upper().replace('-', '').replace(' ', '')
-                                if _injury_upper in ('O', 'OUT', 'IR', 'IL', 'SUSP', 'SUSPENDED', 'INJUREDRESERVE'):
-                                    _injury_color = '#ff6575'
-                                elif _injury_upper in ('DTD', 'DAYTODAY', 'Q', 'QUESTIONABLE', 'DOUBTFUL', 'PROBABLE', 'P'):
-                                    _injury_color = '#f1c75b'
-                                else:
-                                    _injury_color = '#f2f4f7'
-                                _return_text = _html_escape(_return_date or '—')
-                                _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
-                                                if _latest_update else '')
-                                # Assemble the HTML without indented multiline Markdown: Streamlit's
-                                # Markdown parser can render the closing </div> as literal text.
-                                _identity_html = (
-                                    '<div style="line-height:1.45;font-size:0.91rem;">'
-                                    f'<div style="font-size:1.25rem;font-weight:700;margin-bottom:8px;">{_html_escape(_player_name)}</div>'
-                                    f'<div style="margin-bottom:6px;">{_pos_team}</div>'
-                                    f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
-                                    f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
-                                    f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
-                                    f'<div style="margin-top:10px;color:{_injury_color};"><u>Injury:</u> {_injury_text}</div>'
-                                    f'<div><u>Expected return:</u> {_return_text}</div>'
-                                    f'{_update_html}'
-                                    '</div>'
-                                )
-                                st.markdown(_identity_html, unsafe_allow_html=True)
-
-                        # Compact season summary instead of the former overview table.
-                        # The selected season is the first row, followed by saved history.
-                        per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
-                                         'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
-                        rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
-                        quick_pg = player_rows.copy()
-                        games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
-                                 if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
-                        for col in per_game_cols + ['MIN']:
-                            if col in quick_pg:
-                                quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
-
-                        def quick_display(frame, columns):
-                            view = frame[columns].copy()
-                            for col in columns:
-                                if col in rate_cols or col == 'USG%':
-                                    view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                        lambda v: '—' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
-                                elif col not in ('Season', 'Team', 'Positions'):
-                                    view[col] = pd.to_numeric(view[col], errors='coerce').map(
-                                        lambda v: '—' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
-                            # Display-only substitution: leave the source frame
-                            # and numeric data unchanged for calculations and charts.
-                            return view.fillna('—').replace({'': '—'})
-
-                        if not overview_rows.empty:
-                            summary = overview_rows.iloc[0]
-                            season = str(summary.get('Season', '')).strip()
-                            # Rank controls and the Overview cards live in one small
-                            # fragment. Changing rank selection reruns only this
-                            # fragment, not the headshot, wheel, Fppg bar, or table.
-                            from nba_percentile_wheel import render_percentile_wheel, player_percentiles
-
-                            @st.fragment
-                            def _quick_rank_overview(_summary, _season, _player_id,
-                                                     _seasons, _year, _position_pairs,
-                                                     _revision):
-                                # Four compact rank buttons in a 2x2 grid.
-                                # Buttons rerun only this fragment, not the full app.
-                                st.session_state.setdefault('quick_view_rank_choice', 'Fppg')
-                                st.session_state.setdefault('quick_view_scope_choice', 'All')
-                                st.markdown('''<style>
-.st-key-quick_rank_compact [data-testid="stButton"] button {
-    min-height: 1.35rem !important; height: 1.35rem !important;
-    padding: 0 .2rem !important; font-size: .65rem !important;
-    border-radius: 5px !important;
-}
-.st-key-quick_rank_compact [data-testid="stVerticalBlock"] {
-    gap: .48rem !important;
-}
-.st-key-quick_rank_compact [data-testid="stHorizontalBlock"] {
-    gap: .5rem !important;
-}
-.st-key-quick_rank_compact .quick-rank-heading {
-    font-size: .82rem; font-weight: 700; line-height: 1.25;
-    display:block; min-height: 27px; padding: 0 0 9px; margin: 0; white-space:nowrap;
-}
-</style>''', unsafe_allow_html=True)
-                                with st.container(key='quick_rank_compact'):
-                                    _rank_buttons_col, _rank_divider_col, _scope_buttons_col = st.columns([1.4, 0.08, 1.1], gap='small')
-                                    with _rank_divider_col:
-                                        st.markdown('<div style="border-left:1px solid #4a5261;height:55px;margin:10px auto 0;width:1px"></div>', unsafe_allow_html=True)
-                                    with _rank_buttons_col:
-                                        st.markdown('<div class="quick-rank-heading">Rank by</div>', unsafe_allow_html=True)
-                                        for _pair in (('Fppg', 'Fpts'), ('xFppg', 'xFpts')):
-                                            _left, _right = st.columns(2, gap='small')
-                                            for _col, _option in zip((_left, _right), _pair):
-                                                with _col:
-                                                    if st.button(
-                                                        _option,
-                                                        key=f'quick_rank_btn_{_option}',
-                                                        use_container_width=True,
-                                                        type=('primary' if st.session_state['quick_view_rank_choice'] == _option else 'secondary'),
-                                                    ):
-                                                        st.session_state['quick_view_rank_choice'] = _option
-                                                        st.rerun(scope='fragment')
-                                    with _scope_buttons_col:
-                                        st.markdown('<div class="quick-rank-heading">Rank scope</div>', unsafe_allow_html=True)
-                                        for _option in ('All', 'Pos'):
-                                            if st.button(
-                                                _option,
-                                                key=f'quick_scope_btn_{_option}',
-                                                use_container_width=True,
-                                                type=('primary' if st.session_state['quick_view_scope_choice'] == _option else 'secondary'),
-                                            ):
-                                                st.session_state['quick_view_scope_choice'] = _option
-                                                st.rerun(scope='fragment')
-                                    _rank_stat = st.session_state['quick_view_rank_choice']
-                                    _rank_scope = st.session_state['quick_view_scope_choice']
-                                    _rank_maps = cached_quick_all_ranks(
-                                        _seasons, _year, _position_pairs, _revision
-                                    )
-                                    _rank_label = f'{_rank_stat} Rank'
-                                    _rank_value = _rank_maps.get(_rank_stat, {}).get(_rank_scope, {}).get(
-                                        _player_id, float('nan')
-                                    )
-                                    _summary_stats = [
-                                        ('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'),
-                                        (_rank_label, _rank_label), ('Fpts', 'Fpts'),
-                                        ('xFpts', 'xFpts'), ('Fppg', 'Fppg'), ('xFppg', 'xFppg'),
-                                    ]
-                                    _metric_html = []
-                                    from html import escape as _esc_metric
-                                    for key, label in _summary_stats:
-                                        if key != _rank_label and key not in _summary.index:
-                                            continue
-                                        value = (_rank_value if key == _rank_label else
-                                                 pd.to_numeric(_summary.get(key), errors='coerce'))
-                                        if key == 'MIN':
-                                            gp = pd.to_numeric(_summary.get('GP'), errors='coerce')
-                                            value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
-                                        elif key == 'USG%' and pd.notna(value):
-                                            value *= 100
-                                        if pd.isna(value):
-                                            shown = '—'
-                                        elif key == 'USG%':
-                                            shown = f'{value:.1f}%'
-                                        elif key in ('Fppg', 'xFppg'):
-                                            shown = f'{value:,.1f}'
-                                        elif key in ('GP', 'Fpts', 'xFpts', _rank_label):
-                                            shown = f'{value:,.0f}'
-                                        else:
-                                            shown = f'{value:,.1f}'
-                                        _metric_html.append(
-                                            '<div style="padding:8px 7px;border:1px solid #303640;'
-                                            'border-radius:7px;background:#11151c;min-width:0">'
-                                            f'<div style="color:#c2cbd8;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
-                                            f'<div style="color:#f7f8fa;font-size:16px;font-weight:700;line-height:1.2">{_esc_metric(shown)}</div></div>'
+                def render_player_quick_view():
+                    if 'Player' in df.columns and 'Player ID' in df.columns:
+                        with st.expander('🏀 Player Quick View', expanded=True):
+                            options = cached_player_options(df[['Player', 'Player ID']])
+                            if options:
+                                # Regression table can request a player from below this fragment.
+                                # Consume once so ordinary Quick View navigation remains independent.
+                                requested_id = st.session_state.pop('regression_quick_view_request', None)
+                                table_request = st.session_state.pop('_pending_main_table_player_id', None)
+                                # A request is consumed once; the search selectbox then
+                                # owns the active player until another table click.
+                                target_id = requested_id or table_request
+                                current_index = next((i for i, option in enumerate(options)
+                                                      if option[1] == target_id), None) if target_id else None
+                                if current_index is not None:
+                                    st.session_state['quick_view_player'] = options[current_index]
+                                elif st.session_state.get('quick_view_player') not in options:
+                                    # On a fresh page load, default to the player with the
+                                    # most total fantasy points in the latest loaded season.
+                                    # Preserve manual choices and table-click navigation.
+                                    default_option = options[0]
+                                    if {'Season', 'Player ID', 'Fpts'}.issubset(df.columns):
+                                        season_years = pd.to_numeric(season_end_year(df['Season']), errors='coerce')
+                                        if season_years.notna().any():
+                                            latest_year = season_years.max()
+                                            candidates = df.loc[season_years.eq(latest_year), ['Player ID', 'Fpts']].copy()
+                                            candidates['Fpts'] = pd.to_numeric(candidates['Fpts'], errors='coerce')
+                                            candidates = candidates.dropna(subset=['Fpts'])
+                                            if not candidates.empty:
+                                                top_player_id = str(candidates.loc[candidates['Fpts'].idxmax(), 'Player ID'])
+                                                default_option = next((opt for opt in options if opt[1] == top_player_id), options[0])
+                                    st.session_state['quick_view_player'] = default_option
+                                _player_select_col, _year_select_col, _filter_spacer = st.columns([1.5, 1, 6.6], vertical_alignment='bottom')
+                                with _player_select_col:
+                                    choice = st.selectbox('Search player', options, format_func=lambda x: x[0],
+                                                          key='quick_view_player')
+                                # Show every saved season for this player, independent of
+                                # the sidebar's selected seasons/categories. The selected
+                                # season is displayed first, followed by other years.
+                                quick_status = cached_status()
+                                quick_seasons = tuple(sorted(set(quick_status['Season'].dropna().astype(str))))
+                                quick_revision = tuple(quick_status[['Season', 'Category', 'Updated']].itertuples(index=False, name=None)) if not quick_status.empty else ()
+                                player_rows = cached_quick_player_rows(quick_seasons, choice[1], quick_revision)
+                                # The year selector is scoped to the player, so switching
+                                # players automatically selects that player's latest saved season.
+                                season_values = (season_end_year(player_rows['Season'])
+                                                 if 'Season' in player_rows.columns
+                                                 else pd.Series(dtype='float64'))
+                                available_years = sorted({int(y) for y in season_values.dropna()}, reverse=True)
+                                with _year_select_col:
+                                    if available_years:
+                                        selected_year = st.selectbox(
+                                            'Year', available_years,
+                                            format_func=lambda y: f'{y - 1}-{str(y)[-2:]}',
+                                            key=f'quick_view_year_{choice[1]}',
                                         )
-                                    st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px">'
-                                                + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
+                                    else:
+                                        st.selectbox('Year', ['No saved seasons'], disabled=True)
+                                        selected_year = None
+                                # Keep every saved season for the historical stats table; only
+                                # the overview and identity card follow the Year dropdown.
+                                overview_rows = (player_rows.loc[
+                                    season_end_year(player_rows['Season']).eq(selected_year)
+                                ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
+                                photo, _wheel_area, _overview_metrics, _right_margin = st.columns(
+                                    [1.55, 3.30, 1.35, 0.18], gap="small", vertical_alignment="top"
+                                )
+                                with photo:
+                                    # Align the bio title with Percentile Rankings and
+                                    # the season Overview heading in adjacent columns.
+                                    st.markdown(
+                                        '<div style="width:100%;text-align:center;font-weight:800;'
+                                        'font-size:1rem;line-height:1.5;margin:0 0 2px">Player Bio</div>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    url = player_headshot(choice[1])
+                                    if url:
+                                        st.image(url, width=280)
+                                    else:
+                                        st.caption('No headshot ID available')
 
-                            with _overview_metrics:
-                                if season and season.lower() not in ('nan', 'none'):
-                                    st.markdown(f'<div style="font-size:1rem;font-weight:800;line-height:1.5">{season} - Overview</div>', unsafe_allow_html=True)
-                                _quick_rank_overview(
-                                    summary, season, choice[1], quick_seasons, selected_year,
-                                    cached_quick_position_pairs(fantasy_frame), dataset_revision()
-                                )
-                            with _wheel_area:
-                                from nba_percentile_radar import render_percentile_radar
-                                # Reuse precomputed season-wide distributions rather than
-                                # scanning/ranking every peer on each player selection.
-                                _actual_map, _expected_map = cached_quick_season_percentiles(
-                                    quick_seasons, selected_year, dataset_revision()
-                                )
-                                _wheel_percentiles = _actual_map.get(str(choice[1]), {})
-                                _expected_wheel_percentiles = _expected_map.get(str(choice[1]), {})
-                                # Both SVGs are built once from cached data. The
-                                # chart switch is client-side only: no Streamlit rerun,
-                                # API call, database query, or recalculation on toggle.
-                                _wheel_html = render_percentile_wheel(
-                                    _wheel_percentiles, summary,
-                                    expected_percentiles=_expected_wheel_percentiles,
-                                    return_html=True,
-                                )
-                                _radar_html = render_percentile_radar(
-                                    _wheel_percentiles, summary,
-                                    expected_percentiles=_expected_wheel_percentiles,
-                                    return_html=True,
-                                )
-                                from nba_fppg_bar import render_fppg_bar
-                                _bar_html = render_fppg_bar(
-                                    _wheel_percentiles, _expected_wheel_percentiles,
-                                    summary, return_html=True,
-                                )
-                                render_quick_chart_switch(_wheel_html, _radar_html, _bar_html)
+                                    # Compact identity block, matching the MLB Quick View layout.
+                                    # Reuse the already-loaded overview and ESPN lookup; no new API calls.
+                                    from html import escape as _html_escape
+                                    from espn_fantasy import _normalized_name, player_news_fallback_url
+                                    _player_name = str(choice[0])
+                                    _identity_row = overview_rows.iloc[0] if not overview_rows.empty else None
+                                    _nba_team = str(_identity_row.get('Team', '')).strip() if _identity_row is not None else ''
+                                    if _nba_team.lower() in ('nan', 'none'):
+                                        _nba_team = ''
+                                    _logo = nba_team_logo(_nba_team) if _nba_team else None
+                                    _matches = (cached_espn_player_lookup(fantasy_frame).get(_normalized_name(_player_name), [])
+                                                if not fantasy_frame.empty and 'ESPN Player' in fantasy_frame.columns else [])
+                                    _espn_row = _matches[0] if len(_matches) == 1 else {}
+                                    _espn_id = str(_espn_row.get('ESPN ID', '') or '')
+                                    _position = str(_identity_row.get('Positions', '')).strip() if _identity_row is not None else ''
+                                    if _position.lower() in ('nan', 'none') or not _position:
+                                        _position = str(_espn_row.get('Positions', '') or '').strip()
+                                    if _position.lower() in ('nan', 'none'):
+                                        _position = ''
+                                    _age = pd.to_numeric(_identity_row.get('AGE'), errors='coerce') if _identity_row is not None else float('nan')
+                                    _injury = str(_espn_row.get('Injury', '') or '').strip()
+                                    if _injury.lower() in ('nan', 'none', 'healthy', 'active'):
+                                        _injury = ''
+                                    _fantasy_team = str(_espn_row.get('Fantasy Team', '') or '').strip()
+                                    if _fantasy_team.lower() in ('nan', 'none'):
+                                        _fantasy_team = ''
+                                    _pos_team = f"<strong>{_html_escape(_position or '—')}</strong>"
+                                    if _nba_team:
+                                        _pos_team += ' &nbsp;|&nbsp; '
+                                        if _logo:
+                                            _pos_team += (f'<img src="{_html_escape(_logo, quote=True)}" '
+                                                          'style="width:24px;height:24px;vertical-align:middle;margin-right:4px">')
+                                        _pos_team += f'<strong>{_html_escape(_nba_team)}</strong>'
+                                    _age_text = f'Age: {int(_age)}' if pd.notna(_age) else ''
+                                    _rnd, _pick = _espn_row.get('Draft Round'), _espn_row.get('Draft Pick')
+                                    if pd.notna(_rnd) and pd.notna(_pick):
+                                        _draft_text = f'Round {int(_rnd)}, Pick {int(_pick)}'
+                                        if pd.notna(_espn_row.get('Draft Overall')):
+                                            _draft_text += f" ({int(_espn_row['Draft Overall'])})"
+                                    else:
+                                        _draft_text = '—'
+                                    _team_text = _html_escape(_fantasy_team or '—')
+                                    _injury_detail, _return_date, _latest_update = '', '', ''
+                                    # Match ESPN's public injury report by BOTH player name and team.
+                                    # Never pass a fantasy player ID to the ESPN Sports injury endpoint.
+                                    if _injury and _nba_team:
+                                        _injury_record = cached_nba_injury_report().get(
+                                            (_normalized_name(_player_name), _nba_team.upper()), {})
+                                        _injury_detail = _injury_record.get('description', '')
+                                        _return_date = _injury_record.get('expected_return', '')
+                                        _latest_update = _injury_record.get('latest_update', '')
+                                    _injury_text = _html_escape(
+                                        f'{_injury} — {_injury_detail}' if _injury_detail and _injury else (_injury_detail or _injury or '—')
+                                    )
+                                    # Status-specific injury note color: serious/unavailable red,
+                                    # day-to-day/questionable yellow, healthy/unknown white.
+                                    _injury_upper = _injury.upper().replace('-', '').replace(' ', '')
+                                    if _injury_upper in ('O', 'OUT', 'IR', 'IL', 'SUSP', 'SUSPENDED', 'INJUREDRESERVE'):
+                                        _injury_color = '#ff6575'
+                                    elif _injury_upper in ('DTD', 'DAYTODAY', 'Q', 'QUESTIONABLE', 'DOUBTFUL', 'PROBABLE', 'P'):
+                                        _injury_color = '#f1c75b'
+                                    else:
+                                        _injury_color = '#f2f4f7'
+                                    _return_text = _html_escape(_return_date or '—')
+                                    _update_html = (f'<div style="margin-top:3px;"><u>Latest injury update:</u> {_html_escape(_latest_update)}</div>'
+                                                    if _latest_update else '')
+                                    # Assemble the HTML without indented multiline Markdown: Streamlit's
+                                    # Markdown parser can render the closing </div> as literal text.
+                                    _identity_html = (
+                                        '<div style="line-height:1.45;font-size:0.91rem;">'
+                                        f'<div style="font-size:1.25rem;font-weight:700;margin-bottom:8px;">{_html_escape(_player_name)}</div>'
+                                        f'<div style="margin-bottom:6px;">{_pos_team}</div>'
+                                        f'<div style="color:#a7a9b2;font-size:0.83rem;margin-bottom:10px;">{_age_text}</div>'
+                                        f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Draft:</u> {_html_escape(_draft_text)}</div>'
+                                        f'<div style="color:#a7a9b2;font-size:0.83rem;"><u>Fantasy team:</u> {_team_text}</div>'
+                                        f'<div style="margin-top:10px;color:{_injury_color};"><u>Injury:</u> {_injury_text}</div>'
+                                        f'<div><u>Expected return:</u> {_return_text}</div>'
+                                        f'{_update_html}'
+                                        '</div>'
+                                    )
+                                    st.markdown(_identity_html, unsafe_allow_html=True)
 
-                            st.markdown('**Season - Stats**')
-                            pg_columns = [c for c in ['Season', 'Team', 'AGE', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
-                                          [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
-                                                            ('FT%', 'xFT%'), ('PTS', 'xPTS'),
-                                                            ('REB', 'xREB'), ('AST', 'xAST'),
-                                                            ('STL', 'xSTL'), ('BLK', 'xBLK'),
-                                                            ('TOV', 'xTO')] for stat in pair]
-                                          if c in quick_pg]
-                            if pg_columns:
-                                st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
-                                             row_height=35, hide_index=True, use_container_width=True)
+                            # Compact season summary instead of the former overview table.
+                            # The selected season is the first row, followed by saved history.
+                            per_game_cols = ['PTS', 'xPTS', 'REB', 'xREB', 'AST', 'xAST',
+                                             'STL', 'xSTL', 'BLK', 'xBLK', 'TOV', 'xTO']
+                            rate_cols = ['FG%', 'xFG%', '3PT%', 'x3P%', 'FT%', 'xFT%']
+                            quick_pg = player_rows.copy()
+                            games = (pd.to_numeric(quick_pg['GP'], errors='coerce').replace(0, float('nan'))
+                                     if 'GP' in quick_pg else pd.Series(float('nan'), index=quick_pg.index))
+                            for col in per_game_cols + ['MIN']:
+                                if col in quick_pg:
+                                    quick_pg[col] = pd.to_numeric(quick_pg[col], errors='coerce') / games
 
-            render_player_quick_view()
+                            def quick_display(frame, columns):
+                                view = frame[columns].copy()
+                                for col in columns:
+                                    if col in rate_cols or col == 'USG%':
+                                        view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                            lambda v: '—' if pd.isna(v) else f'{v * 100:.1f}'.rstrip('0').rstrip('.') + '%')
+                                    elif col not in ('Season', 'Team', 'Positions'):
+                                        view[col] = pd.to_numeric(view[col], errors='coerce').map(
+                                            lambda v: '—' if pd.isna(v) else f'{v:,.1f}'.rstrip('0').rstrip('.'))
+                                # Display-only substitution: leave the source frame
+                                # and numeric data unchanged for calculations and charts.
+                                return view.fillna('—').replace({'': '—'})
+
+                            if not overview_rows.empty:
+                                summary = overview_rows.iloc[0]
+                                season = str(summary.get('Season', '')).strip()
+                                # Rank controls and the Overview cards live in one small
+                                # fragment. Changing rank selection reruns only this
+                                # fragment, not the headshot, wheel, Fppg bar, or table.
+                                from nba_percentile_wheel import render_percentile_wheel, player_percentiles
+
+                                @st.fragment
+                                def _quick_rank_overview(_summary, _season, _player_id,
+                                                         _seasons, _year, _position_pairs,
+                                                         _revision):
+                                    # Four compact rank buttons in a 2x2 grid.
+                                    # Buttons rerun only this fragment, not the full app.
+                                    st.session_state.setdefault('quick_view_rank_choice', 'Fppg')
+                                    st.session_state.setdefault('quick_view_scope_choice', 'All')
+                                    st.markdown('''<style>
+    .st-key-quick_rank_compact [data-testid="stButton"] button {
+        min-height: 1.35rem !important; height: 1.35rem !important;
+        padding: 0 .2rem !important; font-size: .65rem !important;
+        border-radius: 5px !important;
+    }
+    .st-key-quick_rank_compact [data-testid="stVerticalBlock"] {
+        gap: .48rem !important;
+    }
+    .st-key-quick_rank_compact [data-testid="stHorizontalBlock"] {
+        gap: .5rem !important;
+    }
+    .st-key-quick_rank_compact .quick-rank-heading {
+        font-size: .82rem; font-weight: 700; line-height: 1.25;
+        display:block; min-height: 27px; padding: 0 0 9px; margin: 0; white-space:nowrap;
+    }
+    </style>''', unsafe_allow_html=True)
+                                    with st.container(key='quick_rank_compact'):
+                                        _rank_buttons_col, _rank_divider_col, _scope_buttons_col = st.columns([1.4, 0.08, 1.1], gap='small')
+                                        with _rank_divider_col:
+                                            st.markdown('<div style="border-left:1px solid #4a5261;height:55px;margin:10px auto 0;width:1px"></div>', unsafe_allow_html=True)
+                                        with _rank_buttons_col:
+                                            st.markdown('<div class="quick-rank-heading">Rank by</div>', unsafe_allow_html=True)
+                                            for _pair in (('Fppg', 'Fpts'), ('xFppg', 'xFpts')):
+                                                _left, _right = st.columns(2, gap='small')
+                                                for _col, _option in zip((_left, _right), _pair):
+                                                    with _col:
+                                                        if st.button(
+                                                            _option,
+                                                            key=f'quick_rank_btn_{_option}',
+                                                            use_container_width=True,
+                                                            type=('primary' if st.session_state['quick_view_rank_choice'] == _option else 'secondary'),
+                                                        ):
+                                                            st.session_state['quick_view_rank_choice'] = _option
+                                                            st.rerun(scope='fragment')
+                                        with _scope_buttons_col:
+                                            st.markdown('<div class="quick-rank-heading">Rank scope</div>', unsafe_allow_html=True)
+                                            for _option in ('All', 'Pos'):
+                                                if st.button(
+                                                    _option,
+                                                    key=f'quick_scope_btn_{_option}',
+                                                    use_container_width=True,
+                                                    type=('primary' if st.session_state['quick_view_scope_choice'] == _option else 'secondary'),
+                                                ):
+                                                    st.session_state['quick_view_scope_choice'] = _option
+                                                    st.rerun(scope='fragment')
+                                        _rank_stat = st.session_state['quick_view_rank_choice']
+                                        _rank_scope = st.session_state['quick_view_scope_choice']
+                                        _rank_maps = cached_quick_all_ranks(
+                                            _seasons, _year, _position_pairs, _revision
+                                        )
+                                        _rank_label = f'{_rank_stat} Rank'
+                                        _rank_value = _rank_maps.get(_rank_stat, {}).get(_rank_scope, {}).get(
+                                            _player_id, float('nan')
+                                        )
+                                        _summary_stats = [
+                                            ('GP', 'GP'), ('MIN', 'Min'), ('USG%', 'Usg'),
+                                            (_rank_label, _rank_label), ('Fpts', 'Fpts'),
+                                            ('xFpts', 'xFpts'), ('Fppg', 'Fppg'), ('xFppg', 'xFppg'),
+                                        ]
+                                        _metric_html = []
+                                        from html import escape as _esc_metric
+                                        for key, label in _summary_stats:
+                                            if key != _rank_label and key not in _summary.index:
+                                                continue
+                                            value = (_rank_value if key == _rank_label else
+                                                     pd.to_numeric(_summary.get(key), errors='coerce'))
+                                            if key == 'MIN':
+                                                gp = pd.to_numeric(_summary.get('GP'), errors='coerce')
+                                                value = value / gp if pd.notna(gp) and gp > 0 else float('nan')
+                                            elif key == 'USG%' and pd.notna(value):
+                                                value *= 100
+                                            if pd.isna(value):
+                                                shown = '—'
+                                            elif key == 'USG%':
+                                                shown = f'{value:.1f}%'
+                                            elif key in ('Fppg', 'xFppg'):
+                                                shown = f'{value:,.1f}'
+                                            elif key in ('GP', 'Fpts', 'xFpts', _rank_label):
+                                                shown = f'{value:,.0f}'
+                                            else:
+                                                shown = f'{value:,.1f}'
+                                            _metric_html.append(
+                                                '<div style="padding:8px 7px;border:1px solid #303640;'
+                                                'border-radius:7px;background:#11151c;min-width:0">'
+                                                f'<div style="color:#c2cbd8;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{_esc_metric(label)}</div>'
+                                                f'<div style="color:#f7f8fa;font-size:16px;font-weight:700;line-height:1.2">{_esc_metric(shown)}</div></div>'
+                                            )
+                                        st.markdown('<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px">'
+                                                    + ''.join(_metric_html) + '</div>', unsafe_allow_html=True)
+
+                                with _overview_metrics:
+                                    if season and season.lower() not in ('nan', 'none'):
+                                        st.markdown(f'<div style="font-size:1rem;font-weight:800;line-height:1.5">{season} - Overview</div>', unsafe_allow_html=True)
+                                    _quick_rank_overview(
+                                        summary, season, choice[1], quick_seasons, selected_year,
+                                        cached_quick_position_pairs(fantasy_frame), quick_revision
+                                    )
+                                with _wheel_area:
+                                    from nba_percentile_radar import render_percentile_radar
+                                    # Reuse precomputed season-wide distributions rather than
+                                    # scanning/ranking every peer on each player selection.
+                                    _actual_map, _expected_map = cached_quick_season_percentiles(
+                                        quick_seasons, selected_year, quick_revision
+                                    )
+                                    _wheel_percentiles = _actual_map.get(str(choice[1]), {})
+                                    _expected_wheel_percentiles = _expected_map.get(str(choice[1]), {})
+                                    # Both SVGs are built once from cached data. The
+                                    # chart switch is client-side only: no Streamlit rerun,
+                                    # API call, database query, or recalculation on toggle.
+                                    _wheel_html = render_percentile_wheel(
+                                        _wheel_percentiles, summary,
+                                        expected_percentiles=_expected_wheel_percentiles,
+                                        return_html=True,
+                                    )
+                                    _radar_html = render_percentile_radar(
+                                        _wheel_percentiles, summary,
+                                        expected_percentiles=_expected_wheel_percentiles,
+                                        return_html=True,
+                                    )
+                                    from nba_fppg_bar import render_fppg_bar
+                                    _bar_html = render_fppg_bar(
+                                        _wheel_percentiles, _expected_wheel_percentiles,
+                                        summary, return_html=True,
+                                    )
+                                    render_quick_chart_switch(_wheel_html, _radar_html, _bar_html)
+
+                                st.markdown('**Season - Stats**')
+                                pg_columns = [c for c in ['Season', 'Team', 'AGE', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
+                                              [stat for pair in [('FG%', 'xFG%'), ('3PT%', 'x3P%'),
+                                                                ('FT%', 'xFT%'), ('PTS', 'xPTS'),
+                                                                ('REB', 'xREB'), ('AST', 'xAST'),
+                                                                ('STL', 'xSTL'), ('BLK', 'xBLK'),
+                                                                ('TOV', 'xTO')] for stat in pair]
+                                              if c in quick_pg]
+                                if pg_columns:
+                                    st.dataframe(quick_display(quick_pg, pg_columns), height=min(420, 35 * (len(quick_pg) + 1) + 3),
+                                                 row_height=35, hide_index=True, use_container_width=True,
+                                                 column_config={'Season': st.column_config.Column(pinned=True)})
+
+                render_player_quick_view()
+
+            render_table_and_quick_view()
 
 
 render_main_stats_section()
@@ -1742,8 +1727,8 @@ def fantasy_team_analysis():
             theme_accent=st.get_option('theme.primaryColor') or '#ff4b4b',
             stat_mode=_mode, logo_url=nba_team_logo, compact_player=True)
         _viewer_click = _nba_compact_click(
-            html=_viewer_html, height=min(585, 34 + 41 * len(_compact)),
-            key='nba_fantasy_viewer_compact_click')
+            html=_viewer_html, height=min(585, 34 + 41 * len(_compact)) + 24,
+            key='nba_fantasy_viewer_compact_click', integrated_freeze=True)
         if isinstance(_viewer_click, dict) and _viewer_click.get('player_id'):
             try:
                 _pid = str(int(_viewer_click['player_id']))
