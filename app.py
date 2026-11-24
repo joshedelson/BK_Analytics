@@ -79,13 +79,14 @@ def render_quick_chart_switch(wheel_html, radar_html, bar_html):
     bar_inner = bar_inner.replace('url(#expected-stripes)', 'url(#fppg-expected-stripes)')
     markup = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}
+html,body{margin:0;padding:0;min-height:0!important;height:auto!important;overflow:hidden;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}
 .chart-heading{display:flex;justify-content:center;align-items:center;gap:10px;min-height:24px;margin:0 0 2px;font-size:16px;font-weight:700;white-space:nowrap}
 .chart-switch{display:flex;align-items:center;gap:5px;font-size:9px;font-weight:400}
 .chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:5px;color:#cbd5e1;padding:4px 8px;cursor:pointer;font:inherit}
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
 .visual{width:100%;max-width:605px;margin:0 auto}
 .visual>svg{display:block;width:100%;height:auto;overflow:visible}
+@media(max-width:640px){.chart-heading{margin-top:18px;margin-bottom:6px}.visual{margin-bottom:12px}}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="chart-heading"><span>Percentile Rankings</span>
@@ -104,14 +105,25 @@ const wb=document.getElementById('wheel-btn'),rb=document.getElementById('radar-
 function show(mode){const w=mode==='wheel';wheel.setAttribute('display',w?'inline':'none');radar.setAttribute('display',w?'none':'inline');
 wb.setAttribute('aria-pressed',String(w));rb.setAttribute('aria-pressed',String(!w));}
 wb.addEventListener('click',()=>show('wheel'));rb.addEventListener('click',()=>show('radar'));
-// The SVG scales down on narrow screens; shrink the Streamlit iframe too.
+// Measure the rendered content, not the iframe viewport or its body height.
+// On mobile the SVG scales with its width, so a fixed 485px iframe leaves a gap.
+let lastHeight=0;
 function resizeFrame(){
-  const height=Math.ceil(document.body.getBoundingClientRect().height)+4;
-  window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:height},'*');
+  const heading=document.querySelector('.chart-heading');
+  const visual=document.querySelector('.visual');
+  if(!heading||!visual)return;
+  const bottom=Math.max(heading.getBoundingClientRect().bottom,
+                        visual.getBoundingClientRect().bottom);
+  const height=Math.ceil(bottom-document.documentElement.getBoundingClientRect().top)+3;
+  if(Math.abs(height-lastHeight)>1){
+    lastHeight=height;
+    window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height},'*');
+  }
 }
 window.addEventListener('resize',resizeFrame);
-new ResizeObserver(resizeFrame).observe(document.body);
-requestAnimationFrame(resizeFrame);
+new ResizeObserver(resizeFrame).observe(document.querySelector('.visual'));
+new ResizeObserver(resizeFrame).observe(document.querySelector('.chart-heading'));
+requestAnimationFrame(()=>requestAnimationFrame(resizeFrame));
 </script></body></html>"""
     markup = (markup.replace('__WHEEL__', inner(wheel_svg))
                     .replace('__RADAR__', inner(radar_svg))
