@@ -86,7 +86,7 @@ html,body{margin:0;padding:0;min-height:0!important;height:auto!important;overfl
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
 .visual{width:100%;max-width:605px;margin:0 auto}
 .visual>svg{display:block;width:100%;height:auto;overflow:visible}
-@media(max-width:640px){.chart-heading{margin-top:18px;margin-bottom:6px}.visual{margin-bottom:12px}}
+@media(max-width:640px){.chart-heading{margin-top:0;margin-bottom:6px}.visual{margin-bottom:0}}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="chart-heading"><span>Percentile Rankings</span>
@@ -105,30 +105,36 @@ const wb=document.getElementById('wheel-btn'),rb=document.getElementById('radar-
 function show(mode){const w=mode==='wheel';wheel.setAttribute('display',w?'inline':'none');radar.setAttribute('display',w?'none':'inline');
 wb.setAttribute('aria-pressed',String(w));rb.setAttribute('aria-pressed',String(!w));}
 wb.addEventListener('click',()=>show('wheel'));rb.addEventListener('click',()=>show('radar'));
-// Measure the rendered content, not the iframe viewport or its body height.
-// On mobile the SVG scales with its width, so a fixed 485px iframe leaves a gap.
-let lastHeight=0;
-function resizeFrame(){
-  const heading=document.querySelector('.chart-heading');
-  const visual=document.querySelector('.visual');
-  if(!heading||!visual)return;
-  const bottom=Math.max(heading.getBoundingClientRect().bottom,
-                        visual.getBoundingClientRect().bottom);
-  const height=Math.ceil(bottom-document.documentElement.getBoundingClientRect().top)+3;
-  if(Math.abs(height-lastHeight)>1){
-    lastHeight=height;
-    window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',height},'*');
-  }
-}
-window.addEventListener('resize',resizeFrame);
-new ResizeObserver(resizeFrame).observe(document.querySelector('.visual'));
-new ResizeObserver(resizeFrame).observe(document.querySelector('.chart-heading'));
-requestAnimationFrame(()=>requestAnimationFrame(resizeFrame));
 </script></body></html>"""
     markup = (markup.replace('__WHEEL__', inner(wheel_svg))
                     .replace('__RADAR__', inner(radar_svg))
                     .replace('__BAR__', bar_inner))
-    components.html(markup, height=485, scrolling=False)
+    # Scope sizing to this chart only. The parent iframe is a Streamlit HTML
+    # element, not a registered custom component; resize messages may be ignored.
+    with st.container(key="nba_quick_chart_frame"):
+        st.markdown("""<style>
+        @media (max-width: 640px) {
+          .st-key-nba_quick_chart_frame { padding-top: 12px; padding-bottom: 0; }
+          .st-key-nba_quick_chart_frame [data-testid="stVerticalBlock"] { gap: 0 !important; }
+          .st-key-nba_quick_chart_frame iframe {
+            display: block !important;
+            width: 100% !important;
+            height: auto !important;
+            aspect-ratio: 720 / 485;
+            min-height: 0 !important;
+          }
+          .st-key-nba_quick_chart_frame [data-testid="stElementContainer"]:has(iframe),
+          .st-key-nba_quick_chart_frame [data-testid="stCustomComponentV1"]:has(iframe) {
+            container-type: inline-size;
+            height: auto !important;
+            min-height: 0 !important;
+          }
+          .st-key-nba_quick_chart_frame iframe {
+            height: calc(67.361111cqw + 36px) !important;
+          }
+        }
+        </style>""", unsafe_allow_html=True)
+        components.html(markup, height=485, scrolling=False)
 
 
 def load_scoring_presets():
