@@ -14,6 +14,7 @@ import streamlit.components.v1 as components
 from nba_compact_table import render_nba_html
 
 _nba_compact_click = components.declare_component('nba_compact_click', path=str(Path(__file__).resolve().parent / 'compact_click'))
+_nba_quick_chart = components.declare_component('nba_quick_chart', path=str(Path(__file__).resolve().parent / 'quick_chart'))
 
 st.set_page_config(page_title='NBA Fantasy Analytics', page_icon='🏀', layout='wide')
 st.markdown('''<style>
@@ -86,7 +87,7 @@ html,body{margin:0;padding:0;min-height:0!important;height:auto!important;overfl
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
 .visual{width:100%;max-width:605px;margin:0 auto}
 .visual>svg{display:block;width:100%;height:auto;overflow:visible}
-@media(max-width:640px){.chart-heading{margin-top:0;margin-bottom:6px}.visual{margin-bottom:0}}
+@media(max-width:640px){.chart-heading{margin-top:12px;margin-bottom:6px}.visual{margin-bottom:0}}
 [hidden]{display:none!important}
 </style></head><body>
 <div class="chart-heading"><span>Percentile Rankings</span>
@@ -109,32 +110,7 @@ wb.addEventListener('click',()=>show('wheel'));rb.addEventListener('click',()=>s
     markup = (markup.replace('__WHEEL__', inner(wheel_svg))
                     .replace('__RADAR__', inner(radar_svg))
                     .replace('__BAR__', bar_inner))
-    # Scope sizing to this chart only. The parent iframe is a Streamlit HTML
-    # element, not a registered custom component; resize messages may be ignored.
-    with st.container(key="nba_quick_chart_frame"):
-        st.markdown("""<style>
-        @media (max-width: 640px) {
-          .st-key-nba_quick_chart_frame { padding-top: 12px; padding-bottom: 0; }
-          .st-key-nba_quick_chart_frame [data-testid="stVerticalBlock"] { gap: 0 !important; }
-          .st-key-nba_quick_chart_frame iframe {
-            display: block !important;
-            width: 100% !important;
-            height: auto !important;
-            aspect-ratio: 720 / 485;
-            min-height: 0 !important;
-          }
-          .st-key-nba_quick_chart_frame [data-testid="stElementContainer"]:has(iframe),
-          .st-key-nba_quick_chart_frame [data-testid="stCustomComponentV1"]:has(iframe) {
-            container-type: inline-size;
-            height: auto !important;
-            min-height: 0 !important;
-          }
-          .st-key-nba_quick_chart_frame iframe {
-            height: calc(67.361111cqw + 36px) !important;
-          }
-        }
-        </style>""", unsafe_allow_html=True)
-        components.html(markup, height=485, scrolling=False)
+    _nba_quick_chart(markup=markup, key="nba_quick_chart", default=None)
 
 
 def load_scoring_presets():

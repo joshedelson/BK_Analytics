@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;padding:0;overflow:hidden}iframe{display:block;width:100%;border:0;height:0}</style></head><body><iframe id="chart" title="Percentile Rankings"></iframe><script>
+const chart=document.getElementById('chart');let previous='',last=-1,raf=0;
+function send(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
+function measure(){cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>{const d=chart.contentDocument;if(!d||!d.querySelector('.visual'))return;const h=Math.ceil(d.querySelector('.visual').getBoundingClientRect().bottom)+8;chart.style.height=h+'px';if(h!==last){last=h;send('streamlit:setFrameHeight',{height:h});}});}
+chart.addEventListener('load',()=>{const d=chart.contentDocument;if(!d)return;new ResizeObserver(measure).observe(d.body);measure();});
+window.addEventListener('resize',measure);new ResizeObserver(measure).observe(document.body);
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const markup=e.data.args?.markup;if(typeof markup==='string'&&markup!==previous){previous=markup;chart.srcdoc=markup;}else measure();});
+send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:0});
+</script></body></html>
