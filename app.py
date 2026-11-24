@@ -42,58 +42,72 @@ def _svg_from_html(chart_html):
     return match.group(0) if match else ""
 
 
-def render_quick_chart_switch(wheel_html, radar_html):
-    # Preserve the native SVG font sizes while retaining 75%-scale geometry.
+def render_quick_chart_switch(wheel_html, radar_html, bar_html):
+    """One responsive SVG for wheel/radar plus the shared Fppg bar."""
     wheel_svg = _svg_from_html(wheel_html)
     radar_svg = _svg_from_html(radar_html)
-    # Increase numeric annotations only; retain chart geometry and stat-name labels.
-    def _enlarge_numeric_svg_text(svg):
+    bar_svg = _svg_from_html(bar_html)
+    if not all((wheel_svg, radar_svg, bar_svg)):
+        st.warning('The percentile visualization could not be rendered.')
+        return
+
+    # Scale only text containing numbers, keeping stat-name labels unchanged.
+    def enlarge_numbers(svg):
         def change(match):
             opening, body, closing = match.groups()
             if not re.search(r'\d', re.sub(r'<[^>]*>', '', body)):
                 return match.group(0)
-            def size_up(m):
-                return m.group(1) + str(round(float(m.group(2)) * 1.1, 2)) + m.group(3)
-            opening = re.sub(r'(font-size=[\"\'])([\d.]+)([\"\'])', size_up, opening)
+            opening = re.sub(
+                r'(font-size=["\'])([\d.]+)(["\'])',
+                lambda m: m.group(1) + str(round(float(m.group(2)) * 1.1, 2)) + m.group(3),
+                opening,
+            )
             return opening + body + closing
         return re.sub(r'(<text\b[^>]*>)(.*?)(</text>)', change, svg, flags=re.S)
-    wheel_svg = _enlarge_numeric_svg_text(wheel_svg)
-    radar_svg = _enlarge_numeric_svg_text(radar_svg)
-    markup = """<!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+
+    wheel_svg = enlarge_numbers(wheel_svg)
+    radar_svg = enlarge_numbers(radar_svg)
+    bar_svg = enlarge_numbers(bar_svg)
+
+    # Strip only the outer SVG tags; each source's geometry remains in its
+    # original viewBox, so stat labels, legend, and gridlines scale together.
+    def inner(svg):
+        return re.sub(r'</svg>\s*$', '', re.sub(r'^<svg\b[^>]*>', '', svg, count=1), flags=re.I)
+
+    # Prefix IDs in the bar to avoid conflicts with chart SVG definitions.
+    bar_inner = inner(bar_svg).replace('id="expected-stripes"', 'id="fppg-expected-stripes"')
+    bar_inner = bar_inner.replace('url(#expected-stripes)', 'url(#fppg-expected-stripes)')
+    markup = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}body{position:relative}
-.chart-heading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:24px;margin:0 0 2px;font-size:16px;font-weight:700;white-space:nowrap}
-.chart-switch{display:flex;align-items:center;gap:5px;font-size:9px;color:#cbd5e1;font-weight:400}
+html,body{margin:0;background:transparent;color:#f2f4f7;font-family:Arial,sans-serif}
+.chart-heading{display:flex;justify-content:center;align-items:center;gap:10px;min-height:24px;margin:0 0 2px;font-size:16px;font-weight:700;white-space:nowrap}
+.chart-switch{display:flex;align-items:center;gap:5px;font-size:9px;font-weight:400}
 .chart-switch button{background:#181f2b;border:1px solid #485366;border-radius:5px;color:#cbd5e1;padding:4px 8px;cursor:pointer;font:inherit}
 .chart-switch button[aria-pressed="true"]{background:#34435b;border-color:#8ca7cc;color:#fff;font-weight:700}
-.chart{width:75%;max-width:405px;margin:0 auto}
-.chart svg{width:100%;height:auto;display:block}
-.chart[hidden]{display:none!important}
+.visual{width:100%;max-width:500px;margin:0 auto}
+.visual>svg{display:block;width:100%;height:auto;overflow:visible}
+[hidden]{display:none!important}
 </style></head><body>
 <div class="chart-heading"><span>Percentile Rankings</span>
 <div class="chart-switch" role="group" aria-label="Percentile chart style">
-  <button id="wheel-btn" type="button" aria-label="Wheel" title="Wheel" aria-pressed="true">1</button>
-  <button id="radar-btn" type="button" aria-label="Radar" title="Radar" aria-pressed="false">2</button>
+<button id="wheel-btn" type="button" title="Wheel" aria-label="Wheel" aria-pressed="true">1</button>
+<button id="radar-btn" type="button" title="Radar" aria-label="Radar" aria-pressed="false">2</button>
 </div></div>
-<div id="wheel-chart" class="chart">__WHEEL__</div>
-<div id="radar-chart" class="chart" hidden>__RADAR__</div>
+<div class="visual"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 485" role="img" aria-label="Player percentile wheel or radar and Fppg bar">
+<svg id="wheel-chart" x="0" y="0" width="540" height="475" viewBox="0 0 500 450">__WHEEL__</svg>
+<svg id="radar-chart" x="0" y="0" width="540" height="475" viewBox="0 0 540 475" hidden>__RADAR__</svg>
+<svg x="530" y="0" width="140" height="450" viewBox="0 0 140 450">__BAR__</svg>
+</svg></div>
 <script>
-const wheel=document.getElementById('wheel-chart');
-const radar=document.getElementById('radar-chart');
-const wb=document.getElementById('wheel-btn');
-const rb=document.getElementById('radar-btn');
-function show(mode){
-  const isWheel=mode==='wheel';
-  wheel.hidden=!isWheel;radar.hidden=isWheel;
-  wb.setAttribute('aria-pressed',String(isWheel));
-  rb.setAttribute('aria-pressed',String(!isWheel));
-}
-wb.addEventListener('click',()=>show('wheel'));
-rb.addEventListener('click',()=>show('radar'));
+const wheel=document.getElementById('wheel-chart'),radar=document.getElementById('radar-chart');
+const wb=document.getElementById('wheel-btn'),rb=document.getElementById('radar-btn');
+function show(mode){const w=mode==='wheel';wheel.hidden=!w;radar.hidden=w;
+wb.setAttribute('aria-pressed',String(w));rb.setAttribute('aria-pressed',String(!w));}
+wb.addEventListener('click',()=>show('wheel'));rb.addEventListener('click',()=>show('radar'));
 </script></body></html>"""
-    markup = markup.replace("__WHEEL__", wheel_svg).replace("__RADAR__", radar_svg)
-    import streamlit.components.v1 as components
+    markup = (markup.replace('__WHEEL__', inner(wheel_svg))
+                    .replace('__RADAR__', inner(radar_svg))
+                    .replace('__BAR__', bar_inner))
     components.html(markup, height=390, scrolling=False)
 
 
@@ -1299,8 +1313,8 @@ def render_main_stats_section():
                             overview_rows = (player_rows.loc[
                                 season_end_year(player_rows['Season']).eq(selected_year)
                             ].copy() if selected_year is not None else player_rows.iloc[0:0].copy())
-                            photo, _wheel_area, _fppg_area, _overview_metrics, _right_margin = st.columns(
-                                [1.55, 2.58, 0.72, 1.35, 0.18], gap="small", vertical_alignment="top"
+                            photo, _wheel_area, _overview_metrics, _right_margin = st.columns(
+                                [1.55, 3.30, 1.35, 0.18], gap="small", vertical_alignment="top"
                             )
                             with photo:
                                 # Align the bio title with Percentile Rankings and
@@ -1559,22 +1573,12 @@ def render_main_stats_section():
                                     expected_percentiles=_expected_wheel_percentiles,
                                     return_html=True,
                                 )
-                                render_quick_chart_switch(_wheel_html, _radar_html)
-                            with _fppg_area:
-                                st.markdown('<div style="height:26px"></div>', unsafe_allow_html=True)
-                                # Shift the bar visually left without changing column widths
-                                # or the Overview's horizontal position.
-                                st.markdown('''<style>
-.st-key-quick_fppg_shift iframe {
-    transform: translateX(-135px);
-    overflow: visible;
-}
-</style>''', unsafe_allow_html=True)
-                                with st.container(key='quick_fppg_shift'):
-                                    from nba_fppg_bar import render_fppg_bar
-                                    render_fppg_bar(
-                                        _wheel_percentiles, _expected_wheel_percentiles, summary
-                                    )
+                                from nba_fppg_bar import render_fppg_bar
+                                _bar_html = render_fppg_bar(
+                                    _wheel_percentiles, _expected_wheel_percentiles,
+                                    summary, return_html=True,
+                                )
+                                render_quick_chart_switch(_wheel_html, _radar_html, _bar_html)
 
                             st.markdown('**Season - Stats**')
                             pg_columns = [c for c in ['Season', 'Team', 'AGE', 'GP', 'MIN', 'USG%', 'Fpts', 'Fppg'] +
